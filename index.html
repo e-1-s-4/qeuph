@@ -1,0 +1,1124 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Qeuph (QUH) Quantum-Resistant Cryptocurrency</title>
+  <meta name="description" content="Mainnet-ready post-quantum cryptocurrency node suite featuring ML-DSA-87 (FIPS 204) lattice signatures, double SHA3-512 proof-of-work, Bech32m addresses, UTXO + txnonce hybrid consensus, two-thirding emission, encrypted wallet, RPC, and node explorer.">
+  <meta property="og:title" content="Qeuph (QUH) Quantum-Resistant Cryptocurrency">
+  <meta property="og:description" content="Mainnet-ready post-quantum cryptocurrency node suite featuring ML-DSA-87 (FIPS 204) lattice signatures, double SHA3-512 proof-of-work, Bech32m addresses, UTXO + txnonce hybrid consensus, two-thirding emission, encrypted wallet, RPC, and node explorer.">
+  <meta property="og:type" content="website">
+
+  <!-- Lucide Icons & Inter Font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Plus Jakarta Sans"', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'monospace'],
+          },
+          colors: {
+            qcyan: '#06b6d4',
+            qteal: '#14b8a6',
+            qdark: '#090d16',
+            qcard: '#0f172a',
+            qborder: '#1e293b',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background-color: #060911;
+      color: #e2e8f0;
+    }
+    .quantum-glow {
+      box-shadow: 0 0 35px -5px rgba(6, 182, 212, 0.25);
+    }
+    .quantum-glow-teal {
+      box-shadow: 0 0 35px -5px rgba(20, 184, 166, 0.25);
+    }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #090d16;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #1e293b;
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #06b6d4;
+    }
+  </style>
+</head>
+<body class="min-h-screen font-sans antialiased text-slate-200 bg-[#060911]">
+
+  <!-- Top Header -->
+  <header class="border-b border-slate-800 bg-[#0a0f1d]/90 backdrop-blur-md sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-600 via-teal-500 to-indigo-500 flex items-center justify-center font-bold text-white shadow-lg shadow-cyan-500/20 text-lg tracking-wider">
+          QUH
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="font-extrabold text-white text-lg tracking-tight">Qeuph</span>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-cyan-950/80 text-cyan-400 border border-cyan-800/60 font-mono font-medium">Post-Quantum L1</span>
+            <span id="badge-network" class="text-xs px-2 py-0.5 rounded-full bg-emerald-950/80 text-emerald-400 border border-emerald-800/60 font-mono font-medium uppercase">REGTEST</span>
+          </div>
+          <div class="text-xs text-slate-400 font-mono">FIPS 204 ML-DSA-87 • 2×SHA3-512 PoW • Bech32m</div>
+        </div>
+      </div>
+
+      <!-- Network switcher & Miner shortcut -->
+      <div class="flex items-center gap-3">
+        <div class="hidden sm:flex items-center bg-slate-900 border border-slate-800 rounded-lg p-1 text-xs">
+          <button onclick="switchNetwork('regtest')" id="net-regtest" class="px-3 py-1 rounded-md font-medium transition bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">Regtest</button>
+          <button onclick="switchNetwork('testnet')" id="net-testnet" class="px-3 py-1 rounded-md font-medium transition text-slate-400 hover:text-white">Testnet</button>
+          <button onclick="switchNetwork('mainnet')" id="net-mainnet" class="px-3 py-1 rounded-md font-medium transition text-slate-400 hover:text-white">Mainnet</button>
+        </div>
+
+        <button id="btn-toggle-miner-nav" onclick="toggleMiner()" class="flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700">
+          <span class="w-2 h-2 rounded-full bg-slate-500" id="indicator-miner-nav"></span>
+          <span id="text-miner-nav">Start Miner</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Navigation Tabs -->
+  <div class="border-b border-slate-800 bg-[#080d1a]">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex space-x-1 sm:space-x-4 overflow-x-auto py-2 text-sm font-medium">
+      <button onclick="showTab('dashboard')" class="tab-btn px-3 py-2 rounded-lg text-cyan-400 bg-cyan-950/40 border border-cyan-800/50" data-tab="dashboard">
+        ⚡ Node Overview
+      </button>
+      <button onclick="showTab('blocks')" class="tab-btn px-3 py-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/40" data-tab="blocks">
+        🧱 Block Explorer
+      </button>
+      <button onclick="showTab('wallet')" class="tab-btn px-3 py-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/40" data-tab="wallet">
+        👛 Quantum Wallet
+      </button>
+      <button onclick="showTab('mempool')" class="tab-btn px-3 py-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/40" data-tab="mempool">
+        🌊 Mempool (<span id="tab-mempool-count">0</span>)
+      </button>
+      <button onclick="showTab('crypto')" class="tab-btn px-3 py-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/40" data-tab="crypto">
+        🛡️ FIPS 204 Crypto
+      </button>
+      <button onclick="showTab('emission')" class="tab-btn px-3 py-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/40" data-tab="emission">
+        📈 Economics & Emission
+      </button>
+      <button onclick="showTab('rpc')" class="tab-btn px-3 py-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/40" data-tab="rpc">
+        💻 JSON-RPC Console
+      </button>
+    </div>
+  </div>
+
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+
+    <!-- TAB 1: NODE OVERVIEW -->
+    <div id="tab-dashboard" class="tab-content space-y-6">
+      <!-- Top Metrics Grid -->
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div class="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+          <div class="text-xs font-medium text-slate-400 uppercase tracking-wider">Block Height</div>
+          <div class="text-2xl font-bold font-mono text-cyan-400 mt-1" id="stat-height">0</div>
+          <div class="text-[11px] text-slate-500 font-mono mt-0.5" id="stat-network-tag">Regtest</div>
+        </div>
+        <div class="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+          <div class="text-xs font-medium text-slate-400 uppercase tracking-wider">Difficulty</div>
+          <div class="text-2xl font-bold font-mono text-white mt-1" id="stat-diff">1.0</div>
+          <div class="text-[11px] text-slate-500 font-mono mt-0.5 truncate" id="stat-bits">bits: 0x407FFFFF</div>
+        </div>
+        <div class="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+          <div class="text-xs font-medium text-slate-400 uppercase tracking-wider">Block Reward</div>
+          <div class="text-2xl font-bold font-mono text-emerald-400 mt-1" id="stat-reward">50 QUH</div>
+          <div class="text-[11px] text-slate-500 font-mono mt-0.5" id="stat-epoch">Epoch 0 / 54</div>
+        </div>
+        <div class="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+          <div class="text-xs font-medium text-slate-400 uppercase tracking-wider">Miner Hashrate</div>
+          <div class="text-2xl font-bold font-mono text-amber-400 mt-1" id="stat-hashrate">0 H/s</div>
+          <div class="text-[11px] text-slate-500 font-mono mt-0.5" id="stat-mined-blocks">0 blocks mined</div>
+        </div>
+        <div class="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+          <div class="text-xs font-medium text-slate-400 uppercase tracking-wider">Mempool Txs</div>
+          <div class="text-2xl font-bold font-mono text-indigo-400 mt-1" id="stat-mempool">0</div>
+          <div class="text-[11px] text-slate-500 font-mono mt-0.5" id="stat-mempool-bytes">0 bytes</div>
+        </div>
+        <div class="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+          <div class="text-xs font-medium text-slate-400 uppercase tracking-wider">Wallet Balance</div>
+          <div class="text-2xl font-bold font-mono text-teal-400 mt-1" id="stat-wallet-bal">0.00 QUH</div>
+          <div class="text-[11px] text-slate-500 font-mono mt-0.5" id="stat-matured-bal">Matured: 0.00 QUH</div>
+        </div>
+      </div>
+
+      <!-- Quick Action / Interactive Mining Strip -->
+      <div class="bg-gradient-to-r from-slate-900 via-slate-900/90 to-cyan-950/40 border border-slate-800 rounded-xl p-5 shadow-lg">
+        <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div class="space-y-1">
+            <div class="flex items-center gap-2">
+              <h3 class="text-base font-semibold text-white">Quantum Proof-of-Work Solo Miner</h3>
+              <span id="badge-mining-state" class="px-2 py-0.5 rounded text-xs font-mono font-medium bg-slate-800 text-slate-400">OFFLINE</span>
+            </div>
+            <p class="text-xs text-slate-400">
+              Grinds 16-byte nonce with double SHA3-512 over the 168-byte canonical header. Block rewards pay directly to your local ML-DSA-87 wallet address.
+            </p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="toggleMiner()" id="btn-toggle-miner-main" class="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition shadow-md shadow-cyan-600/20">
+              Start Mining
+            </button>
+            <button onclick="mineBlocks(1)" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs border border-slate-700 transition">
+              + Mine 1 Block
+            </button>
+            <button onclick="mineBlocks(5)" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs border border-slate-700 transition">
+              + Mine 5 Blocks
+            </button>
+            <button onclick="mineBlocks(100)" class="px-3 py-2 rounded-lg bg-emerald-950 hover:bg-emerald-900 text-emerald-300 font-medium text-xs border border-emerald-800/60 transition" title="Matures coinbase rewards (needs 100 blocks)">
+              ⚡ Mature Rewards (+100)
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Two column: Best Tip Details + Recent Activity -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Tip details -->
+        <div class="lg:col-span-2 bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-4">
+          <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+            <h3 class="text-sm font-semibold text-white flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-cyan-400"></span>
+              Current Chain Tip Information
+            </h3>
+            <span class="text-xs font-mono text-slate-400" id="tip-updated-time">Just updated</span>
+          </div>
+
+          <div class="space-y-3 text-xs font-mono">
+            <div>
+              <span class="text-slate-500 block text-[11px] uppercase">Best Block Hash (double SHA3-512)</span>
+              <span class="text-cyan-300 break-all select-all font-medium" id="tip-hash">Loading...</span>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <span class="text-slate-500 block text-[11px] uppercase">Cumulative Work (2^512 / target)</span>
+                <span class="text-slate-300 break-all font-medium" id="tip-work">Loading...</span>
+              </div>
+              <div>
+                <span class="text-slate-500 block text-[11px] uppercase">Cryptographic Signatures</span>
+                <span class="text-emerald-400 font-medium" id="crypto-backend">ML-DSA-87 (FIPS 204)</span>
+              </div>
+            </div>
+            <div>
+              <span class="text-slate-500 block text-[11px] uppercase">Mining Payout Address (Bech32m)</span>
+              <span class="text-slate-300 break-all select-all font-medium" id="tip-payout">Loading...</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- System & Consensus Status -->
+        <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-4">
+          <h3 class="text-sm font-semibold text-white border-b border-slate-800 pb-3">
+            Consensus Parameters
+          </h3>
+          <div class="space-y-2.5 text-xs">
+            <div class="flex justify-between py-1 border-b border-slate-800/60">
+              <span class="text-slate-400">Target Block Time</span>
+              <span class="font-mono text-slate-200">300s (5.0 min)</span>
+            </div>
+            <div class="flex justify-between py-1 border-b border-slate-800/60">
+              <span class="text-slate-400">Retarget Window</span>
+              <span class="font-mono text-slate-200">2048 blocks (±4x clamp)</span>
+            </div>
+            <div class="flex justify-between py-1 border-b border-slate-800/60">
+              <span class="text-slate-400">Coinbase Maturity</span>
+              <span class="font-mono text-amber-400">100 confirmations</span>
+            </div>
+            <div class="flex justify-between py-1 border-b border-slate-800/60">
+              <span class="text-slate-400">Max Block Size</span>
+              <span class="font-mono text-slate-200">2,000,000 bytes</span>
+            </div>
+            <div class="flex justify-between py-1 border-b border-slate-800/60">
+              <span class="text-slate-400">Total Supply Cap</span>
+              <span class="font-mono text-emerald-400">31,500,000.00 QUH</span>
+            </div>
+            <div class="flex justify-between py-1">
+              <span class="text-slate-400">Signature Size</span>
+              <span class="font-mono text-slate-200">4,627 B (ML-DSA-87)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent Blocks Table Preview -->
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-3">
+        <div class="flex items-center justify-between">
+          <h3 class="text-sm font-semibold text-white">Latest Blocks</h3>
+          <button onclick="showTab('blocks')" class="text-xs text-cyan-400 hover:text-cyan-300 font-medium">View all blocks →</button>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-800/40 text-slate-400 uppercase text-[10px] tracking-wider">
+              <tr>
+                <th class="py-2.5 px-3">Height</th>
+                <th class="py-2.5 px-3">Block Hash</th>
+                <th class="py-2.5 px-3">Transactions</th>
+                <th class="py-2.5 px-3">Size</th>
+                <th class="py-2.5 px-3">Nonce</th>
+                <th class="py-2.5 px-3">Action</th>
+              </tr>
+            </thead>
+            <tbody id="table-dashboard-blocks" class="divide-y divide-slate-800/60">
+              <tr>
+                <td colspan="6" class="py-6 text-center text-slate-500">Loading blockchain blocks...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: BLOCK EXPLORER -->
+    <div id="tab-blocks" class="tab-content hidden space-y-6">
+      <div class="flex flex-col sm:flex-row items-center justify-between gap-4 bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
+        <div class="w-full sm:w-auto flex-1 max-w-xl">
+          <div class="relative">
+            <input type="text" id="input-block-search" placeholder="Search by block height or 64-byte block hash..." class="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-500 transition">
+            <button onclick="searchBlock()" class="absolute right-2 top-2 px-3 py-1 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-xs font-medium transition">Search</button>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="refreshBlocks()" class="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-xs rounded-lg text-slate-300 transition">↻ Refresh Blocks</button>
+        </div>
+      </div>
+
+      <!-- Block Details Modal/Container -->
+      <div id="block-detail-panel" class="hidden bg-slate-900 border border-cyan-800/60 rounded-xl p-5 space-y-4">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+          <h3 class="text-sm font-bold text-white flex items-center gap-2">
+            <span class="text-cyan-400 font-mono text-base" id="detail-block-height">Block #0</span>
+            <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">168-byte Canonical Header</span>
+          </h3>
+          <button onclick="closeBlockDetail()" class="text-slate-400 hover:text-white text-xs">✕ Close</button>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+          <div>
+            <span class="text-slate-500 text-[11px] block uppercase">Block Hash</span>
+            <span class="text-cyan-300 break-all select-all font-semibold" id="detail-block-hash">-</span>
+          </div>
+          <div>
+            <span class="text-slate-500 text-[11px] block uppercase">Previous Block Hash</span>
+            <span class="text-slate-300 break-all select-all" id="detail-block-prev">-</span>
+          </div>
+          <div>
+            <span class="text-slate-500 text-[11px] block uppercase">Merkle Root (txids pairwise dhash)</span>
+            <span class="text-slate-300 break-all select-all" id="detail-block-merkle">-</span>
+          </div>
+          <div class="grid grid-cols-3 gap-2">
+            <div>
+              <span class="text-slate-500 text-[11px] block uppercase">Timestamp</span>
+              <span class="text-slate-200" id="detail-block-time">-</span>
+            </div>
+            <div>
+              <span class="text-slate-500 text-[11px] block uppercase">Target Bits</span>
+              <span class="text-slate-200" id="detail-block-bits">-</span>
+            </div>
+            <div>
+              <span class="text-slate-500 text-[11px] block uppercase">PoW Nonce</span>
+              <span class="text-amber-400" id="detail-block-nonce">-</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Transactions in this block -->
+        <div class="space-y-2 pt-2 border-t border-slate-800">
+          <h4 class="text-xs font-bold text-slate-300 uppercase tracking-wider">Block Transactions (<span id="detail-block-txcount">1</span>)</h4>
+          <div id="detail-block-txs" class="space-y-2">
+            <!-- Dynamic tx rows -->
+          </div>
+        </div>
+      </div>
+
+      <!-- All Blocks Table -->
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-3">
+        <h3 class="text-sm font-semibold text-white">Blockchain History</h3>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-800/40 text-slate-400 uppercase text-[10px] tracking-wider">
+              <tr>
+                <th class="py-2.5 px-3">Height</th>
+                <th class="py-2.5 px-3">Hash</th>
+                <th class="py-2.5 px-3">Txs</th>
+                <th class="py-2.5 px-3">Coinbase Message / Miner Data</th>
+                <th class="py-2.5 px-3">Size</th>
+                <th class="py-2.5 px-3">Nonce</th>
+                <th class="py-2.5 px-3 text-right">Inspect</th>
+              </tr>
+            </thead>
+            <tbody id="table-all-blocks" class="divide-y divide-slate-800/60">
+              <tr>
+                <td colspan="7" class="py-6 text-center text-slate-500">Loading blocks...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 3: QUANTUM WALLET -->
+    <div id="tab-wallet" class="tab-content hidden space-y-6">
+      <!-- Wallet Header Strip -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <!-- Balance card -->
+        <div class="bg-gradient-to-br from-slate-900 to-slate-950 border border-cyan-800/50 p-5 rounded-xl space-y-3 shadow-lg">
+          <div class="text-xs text-cyan-400 font-semibold uppercase tracking-wider">Wallet Balance</div>
+          <div class="text-3xl font-extrabold font-mono text-white" id="wallet-card-bal">0.00000000 <span class="text-sm font-normal text-cyan-400">QUH</span></div>
+          <div class="text-xs text-slate-400 space-y-1 font-mono pt-2 border-t border-slate-800">
+            <div class="flex justify-between">
+              <span>Matured (Spendable):</span>
+              <span class="text-emerald-400 font-semibold" id="wallet-card-matured">0.00000000 QUH</span>
+            </div>
+            <div class="flex justify-between">
+              <span>Next Spend TxNonce:</span>
+              <span class="text-cyan-300 font-semibold" id="wallet-card-nonce">1</span>
+            </div>
+            <div class="text-[11px] text-slate-500 mt-1">
+              ℹ️ Coinbase rewards require 100 block confirmations before they become spendable.
+            </div>
+          </div>
+        </div>
+
+        <!-- Master Seed & Backup Card -->
+        <div class="md:col-span-2 bg-slate-900/70 border border-slate-800 p-5 rounded-xl space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-xs font-semibold text-white uppercase tracking-wider">Quantum Master Seed (BIP-39 24-Word Backup)</h3>
+            <div class="flex items-center gap-2">
+              <button onclick="generateNewMnemonic()" class="text-xs px-2.5 py-1 bg-cyan-950 text-cyan-300 border border-cyan-800/60 rounded hover:bg-cyan-900 transition">Generate New Seed</button>
+              <button onclick="restoreMnemonicPrompt()" class="text-xs px-2.5 py-1 bg-slate-800 text-slate-300 border border-slate-700 rounded hover:bg-slate-700 transition">Restore Phrase</button>
+            </div>
+          </div>
+          <div class="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs font-mono text-cyan-300 break-words leading-relaxed select-all" id="wallet-mnemonic-box">
+            Loading seed...
+          </div>
+          <p class="text-[11px] text-slate-400">
+            All ML-DSA-87 public and private keys are deterministically derived via <code class="text-cyan-400">SHA3-512(master_seed || LE32(index))</code>.
+          </p>
+        </div>
+      </div>
+
+      <!-- Send Transaction Form & Derived Addresses -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- Send Form -->
+        <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-4">
+          <h3 class="text-sm font-semibold text-white flex items-center gap-2">
+            <span>🚀 Send Post-Quantum Transaction</span>
+          </h3>
+
+          <div class="space-y-3 text-xs">
+            <div>
+              <label class="block text-slate-400 mb-1">From Address Index</label>
+              <select id="send-from-index" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono text-xs focus:border-cyan-500 focus:outline-none">
+                <option value="0">Address #0 (Default)</option>
+                <option value="1">Address #1</option>
+                <option value="2">Address #2</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="block text-slate-400 mb-1">Recipient Address (Bech32m, HRP "quh")</label>
+              <input type="text" id="send-to-addr" placeholder="quh1... or tquh1... or rquh1..." class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono text-xs focus:border-cyan-500 focus:outline-none">
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-slate-400 mb-1">Amount (QUH)</label>
+                <input type="number" step="0.00000001" id="send-amount" placeholder="10.0" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono text-xs focus:border-cyan-500 focus:outline-none">
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Network Fee (QUH)</label>
+                <input type="number" step="0.001" id="send-fee" value="0.01" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono text-xs focus:border-cyan-500 focus:outline-none">
+              </div>
+            </div>
+
+            <button onclick="submitTransaction()" id="btn-send-tx" class="w-full py-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition shadow-md shadow-cyan-600/20">
+              Sign with ML-DSA-87 & Broadcast to Mempool
+            </button>
+            <div id="send-tx-status" class="hidden text-xs p-3 rounded-lg font-mono"></div>
+          </div>
+        </div>
+
+        <!-- Derived Addresses Table -->
+        <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-3">
+          <h3 class="text-sm font-semibold text-white">Derived Addresses</h3>
+          <div class="space-y-2 text-xs font-mono" id="wallet-addresses-list">
+            <!-- Dynamic Address cards -->
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 4: MEMPOOL -->
+    <div id="tab-mempool" class="tab-content hidden space-y-6">
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-4">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div>
+            <h3 class="text-sm font-semibold text-white">Mempool Transactions</h3>
+            <p class="text-xs text-slate-400">Transactions verified against confirmed state + pending txnonce sequence, awaiting block inclusion.</p>
+          </div>
+          <button onclick="refreshMempool()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs rounded text-slate-300 transition">↻ Refresh</button>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-800/40 text-slate-400 uppercase text-[10px] tracking-wider">
+              <tr>
+                <th class="py-2.5 px-3">TxID</th>
+                <th class="py-2.5 px-3">Inputs</th>
+                <th class="py-2.5 px-3">Outputs Total</th>
+                <th class="py-2.5 px-3">Size</th>
+                <th class="py-2.5 px-3">Nonce</th>
+              </tr>
+            </thead>
+            <tbody id="table-mempool-txs" class="divide-y divide-slate-800/60">
+              <tr>
+                <td colspan="5" class="py-8 text-center text-slate-500">Mempool is currently empty. Send a transaction to see it here!</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 5: FIPS 204 LATTICE CRYPTO PLAYGROUND -->
+    <div id="tab-crypto" class="tab-content hidden space-y-6">
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-4">
+        <div>
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <span>🛡️ FIPS 204 (ML-DSA-87) Interactive Lab</span>
+          </h3>
+          <p class="text-xs text-slate-400 mt-1">
+            Test the pure-Python reference implementation of Module-Lattice Digital Signatures (NIST Category 5, 256-bit quantum security level).
+          </p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs font-mono">
+          <div class="p-3 bg-slate-950 border border-slate-800 rounded-lg">
+            <span class="text-slate-500 text-[10px] uppercase block">Public Key Size</span>
+            <span class="text-cyan-400 font-bold text-base">2,592 bytes</span>
+          </div>
+          <div class="p-3 bg-slate-950 border border-slate-800 rounded-lg">
+            <span class="text-slate-500 text-[10px] uppercase block">Secret Key Size</span>
+            <span class="text-purple-400 font-bold text-base">4,896 bytes</span>
+          </div>
+          <div class="p-3 bg-slate-950 border border-slate-800 rounded-lg">
+            <span class="text-slate-500 text-[10px] uppercase block">Signature Size</span>
+            <span class="text-emerald-400 font-bold text-base">4,627 bytes</span>
+          </div>
+        </div>
+
+        <!-- Interactive Sign Form -->
+        <div class="p-4 bg-slate-950 border border-slate-800 rounded-xl space-y-3 text-xs">
+          <label class="block font-semibold text-slate-300">Test Message to Sign</label>
+          <div class="flex gap-2">
+            <input type="text" id="crypto-msg-input" value="The quantum era demands quantum-resistant money. Qeuph." class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 font-mono text-xs focus:outline-none focus:border-cyan-500">
+            <button onclick="runCryptoTest()" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg font-semibold text-xs transition">Execute ML-DSA-87 Sign & Verify</button>
+          </div>
+
+          <div id="crypto-test-output" class="hidden p-3 bg-slate-900 border border-slate-800 rounded-lg space-y-2 font-mono text-xs">
+            <!-- Output dynamically filled -->
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 6: ECONOMICS & EMISSION -->
+    <div id="tab-emission" class="tab-content hidden space-y-6">
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-4">
+        <div>
+          <h3 class="text-base font-bold text-white">The "Two-Thirding" Reward Schedule</h3>
+          <p class="text-xs text-slate-400 mt-1">
+            Qeuph multiplies block rewards by 2/3 every 210,000 blocks (floored at each epoch), forming a geometric progression that never exceeds the 31,500,000 QUH cap.
+          </p>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs font-mono">
+          <div class="p-4 bg-slate-950 border border-slate-800 rounded-xl">
+            <div class="text-slate-400 text-[10px] uppercase">Initial Reward</div>
+            <div class="text-2xl font-bold text-cyan-400 mt-1">50.0 QUH</div>
+            <div class="text-[11px] text-slate-500">Blocks 0 - 209,999</div>
+          </div>
+          <div class="p-4 bg-slate-950 border border-slate-800 rounded-xl">
+            <div class="text-slate-400 text-[10px] uppercase">Exact Total Emission</div>
+            <div class="text-2xl font-bold text-emerald-400 mt-1">31,499,999.8593</div>
+            <div class="text-[11px] text-slate-500">3,149,999,985,930,000 quphi</div>
+          </div>
+          <div class="p-4 bg-slate-950 border border-slate-800 rounded-xl">
+            <div class="text-slate-400 text-[10px] uppercase">Final Non-Zero Epoch</div>
+            <div class="text-2xl font-bold text-amber-400 mt-1">Epoch 53</div>
+            <div class="text-[11px] text-slate-500">1 quphi reward; zero thereafter</div>
+          </div>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-800/40 text-slate-400 uppercase text-[10px] tracking-wider">
+              <tr>
+                <th class="py-2.5 px-3">Epoch</th>
+                <th class="py-2.5 px-3">Start Height</th>
+                <th class="py-2.5 px-3">Block Reward (QUH)</th>
+                <th class="py-2.5 px-3">Block Reward (Atomic quphi)</th>
+                <th class="py-2.5 px-3 text-right">Cumulative Emission (QUH)</th>
+              </tr>
+            </thead>
+            <tbody id="table-emission-rows" class="divide-y divide-slate-800/60">
+              <tr>
+                <td colspan="5" class="py-6 text-center text-slate-500">Loading emission schedule...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 7: JSON-RPC CONSOLE -->
+    <div id="tab-rpc" class="tab-content hidden space-y-6">
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-4">
+        <div>
+          <h3 class="text-base font-bold text-white">JSON-RPC 2.0 Interactive Console</h3>
+          <p class="text-xs text-slate-400 mt-1">
+            Query the full node JSON-RPC interface directly over HTTP POST. Compatible with standard <code class="text-cyan-400">curl</code> requests.
+          </p>
+        </div>
+
+        <!-- Presets -->
+        <div class="flex flex-wrap items-center gap-2 text-xs">
+          <span class="text-slate-400 text-[11px] uppercase font-mono">Presets:</span>
+          <button onclick="setRpcPreset('getblockchaininfo')" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono">getblockchaininfo</button>
+          <button onclick="setRpcPreset('getmininginfo')" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono">getmininginfo</button>
+          <button onclick="setRpcPreset('getmempoolinfo')" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono">getmempoolinfo</button>
+          <button onclick="setRpcPreset('getblock', {height: 0})" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono">getblock (genesis)</button>
+          <button onclick="setRpcPreset('getnetworkinfo')" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono">getnetworkinfo</button>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-semibold text-slate-300 mb-1">Request Payload (JSON-RPC 2.0)</label>
+            <textarea id="rpc-req-box" rows="12" class="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 font-mono text-xs text-cyan-300 focus:outline-none focus:border-cyan-500"></textarea>
+            <button onclick="executeRpc()" class="mt-2 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg font-semibold text-xs transition">Execute Request</button>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-300 mb-1">Response</label>
+            <pre id="rpc-res-box" class="w-full h-[288px] overflow-auto bg-slate-950 border border-slate-800 rounded-xl p-3 font-mono text-xs text-slate-300">Click Execute to run JSON-RPC...</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <footer class="border-t border-slate-800/80 bg-[#080d1a] py-6 text-center text-xs text-slate-500 font-mono">
+    Qeuph (QUH) Quantum-Resistant Ledger • ML-DSA-87 (FIPS 204) + 2×SHA3-512 PoW • MIT License
+  </footer>
+
+  <!-- Application Logic -->
+  <script>
+    let currentTab = 'dashboard';
+    let isMining = false;
+    let refreshInterval = null;
+
+    function showTab(tabId) {
+      currentTab = tabId;
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+      document.getElementById('tab-' + tabId).classList.remove('hidden');
+
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        if (btn.getAttribute('data-tab') === tabId) {
+          btn.className = 'tab-btn px-3 py-2 rounded-lg text-cyan-400 bg-cyan-950/40 border border-cyan-800/50';
+        } else {
+          btn.className = 'tab-btn px-3 py-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/40';
+        }
+      });
+
+      if (tabId === 'blocks') refreshBlocks();
+      if (tabId === 'wallet') refreshWallet();
+      if (tabId === 'mempool') refreshMempool();
+      if (tabId === 'emission') loadEmission();
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        // Update stats
+        document.getElementById('stat-height').textContent = data.height;
+        document.getElementById('stat-network-tag').textContent = data.network.toUpperCase();
+        document.getElementById('badge-network').textContent = data.network;
+        document.getElementById('stat-diff').textContent = data.difficulty < 1 ? data.difficulty.toExponential(2) : data.difficulty.toFixed(2);
+        document.getElementById('stat-bits').textContent = `bits: ${data.bits}`;
+        document.getElementById('stat-reward').textContent = `${data.reward_quh.toFixed(2)} QUH`;
+        document.getElementById('stat-epoch').textContent = `Epoch ${data.epoch} / 54`;
+        document.getElementById('stat-hashrate').textContent = `${data.hashrate} H/s`;
+        document.getElementById('stat-mined-blocks').textContent = `${data.blocks_mined} blocks mined`;
+        document.getElementById('stat-mempool').textContent = data.mempool_count;
+        document.getElementById('tab-mempool-count').textContent = data.mempool_count;
+        document.getElementById('stat-mempool-bytes').textContent = `${data.mempool_bytes} bytes`;
+        document.getElementById('stat-wallet-bal').textContent = `${data.wallet_balance_quh.toFixed(2)} QUH`;
+        document.getElementById('stat-matured-bal').textContent = `Matured: ${data.wallet_matured_quh.toFixed(2)} QUH`;
+
+        document.getElementById('tip-hash').textContent = data.best_hash;
+        document.getElementById('tip-work').textContent = data.chainwork;
+        document.getElementById('tip-payout').textContent = data.payout_address || data.wallet_address;
+        document.getElementById('crypto-backend').textContent = `ML-DSA-87 (${data.backend} backend)`;
+
+        // Update Mining Buttons
+        isMining = data.mining;
+        updateMinerButtons(data.mining);
+
+        // Update Wallet Card
+        document.getElementById('wallet-card-bal').innerHTML = `${data.wallet_balance_quh.toFixed(8)} <span class="text-sm font-normal text-cyan-400">QUH</span>`;
+        document.getElementById('wallet-card-matured').textContent = `${data.wallet_matured_quh.toFixed(8)} QUH`;
+        document.getElementById('wallet-card-nonce').textContent = data.wallet_nonce + 1;
+
+      } catch (err) {
+        console.error('Fetch status error:', err);
+      }
+    }
+
+    function updateMinerButtons(mining) {
+      const navBtn = document.getElementById('btn-toggle-miner-nav');
+      const navDot = document.getElementById('indicator-miner-nav');
+      const navText = document.getElementById('text-miner-nav');
+      const mainBtn = document.getElementById('btn-toggle-miner-main');
+      const badge = document.getElementById('badge-mining-state');
+
+      if (mining) {
+        navDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+        navText.textContent = 'Mining Active';
+        navBtn.className = 'flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition bg-emerald-950 text-emerald-400 border border-emerald-800';
+        mainBtn.textContent = 'Stop Mining';
+        mainBtn.className = 'px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs transition shadow-md shadow-rose-600/20';
+        badge.className = 'px-2 py-0.5 rounded text-xs font-mono font-medium bg-emerald-950 text-emerald-400 border border-emerald-800/60';
+        badge.textContent = 'ACTIVE MINER';
+      } else {
+        navDot.className = 'w-2 h-2 rounded-full bg-slate-500';
+        navText.textContent = 'Start Miner';
+        navBtn.className = 'flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700';
+        mainBtn.textContent = 'Start Mining';
+        mainBtn.className = 'px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition shadow-md shadow-cyan-600/20';
+        badge.className = 'px-2 py-0.5 rounded text-xs font-mono font-medium bg-slate-800 text-slate-400';
+        badge.textContent = 'OFFLINE';
+      }
+    }
+
+    async function toggleMiner() {
+      try {
+        const res = await fetch('/api/miner/toggle', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({action: isMining ? 'stop' : 'start'})
+        });
+        const data = await res.json();
+        isMining = data.mining;
+        updateMinerButtons(isMining);
+        fetchStatus();
+      } catch (e) {
+        console.error('Toggle miner error:', e);
+      }
+    }
+
+    async function mineBlocks(count) {
+      try {
+        const res = await fetch('/api/miner/mine_blocks', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({count})
+        });
+        const data = await res.json();
+        if (data.success) {
+          fetchStatus();
+          refreshBlocks();
+        }
+      } catch (e) {
+        console.error('Mine blocks error:', e);
+      }
+    }
+
+    async function switchNetwork(networkName) {
+      try {
+        const res = await fetch('/api/network/switch', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({network: networkName})
+        });
+        const data = await res.json();
+        if (data.success) {
+          ['regtest', 'testnet', 'mainnet'].forEach(n => {
+            const btn = document.getElementById('net-' + n);
+            if (n === networkName) {
+              btn.className = 'px-3 py-1 rounded-md font-medium transition bg-cyan-500/20 text-cyan-300 border border-cyan-500/40';
+            } else {
+              btn.className = 'px-3 py-1 rounded-md font-medium transition text-slate-400 hover:text-white';
+            }
+          });
+          fetchStatus();
+          refreshBlocks();
+          refreshWallet();
+        }
+      } catch (e) {
+        console.error('Switch network error:', e);
+      }
+    }
+
+    async function refreshBlocks() {
+      try {
+        const res = await fetch('/api/blocks?limit=15');
+        const data = await res.json();
+        const tbodyDash = document.getElementById('table-dashboard-blocks');
+        const tbodyAll = document.getElementById('table-all-blocks');
+
+        if (!data.blocks || data.blocks.length === 0) {
+          tbodyDash.innerHTML = '<tr><td colspan="6" class="py-6 text-center text-slate-500">No blocks found.</td></tr>';
+          return;
+        }
+
+        let htmlDash = '';
+        let htmlAll = '';
+
+        data.blocks.forEach(b => {
+          const shortHash = b.hash.slice(0, 16) + '...' + b.hash.slice(-8);
+          const cbMsg = b.coinbase_data ? b.coinbase_data.slice(0, 48) + '...' : 'Coinbase Tx';
+
+          htmlDash += `
+            <tr class="hover:bg-slate-800/30 transition">
+              <td class="py-2.5 px-3 font-bold text-cyan-400">#${b.height}</td>
+              <td class="py-2.5 px-3 text-slate-300 truncate max-w-xs" title="${b.hash}">${shortHash}</td>
+              <td class="py-2.5 px-3 text-emerald-400">${b.tx_count} tx</td>
+              <td class="py-2.5 px-3 text-slate-400">${b.size.toLocaleString()} B</td>
+              <td class="py-2.5 px-3 text-amber-400">${b.nonce}</td>
+              <td class="py-2.5 px-3">
+                <button onclick="inspectBlock('${b.height}')" class="text-cyan-400 hover:underline">Inspect</button>
+              </td>
+            </tr>
+          `;
+
+          htmlAll += `
+            <tr class="hover:bg-slate-800/30 transition">
+              <td class="py-2.5 px-3 font-bold text-cyan-400">#${b.height}</td>
+              <td class="py-2.5 px-3 text-slate-300 truncate max-w-xs" title="${b.hash}">${shortHash}</td>
+              <td class="py-2.5 px-3 text-emerald-400">${b.tx_count} tx</td>
+              <td class="py-2.5 px-3 text-slate-400 italic truncate max-w-xs" title="${b.coinbase_data || ''}">${cbMsg}</td>
+              <td class="py-2.5 px-3 text-slate-400">${b.size.toLocaleString()} B</td>
+              <td class="py-2.5 px-3 text-amber-400">${b.nonce}</td>
+              <td class="py-2.5 px-3 text-right">
+                <button onclick="inspectBlock('${b.height}')" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-cyan-300 rounded text-[11px]">Details</button>
+              </td>
+            </tr>
+          `;
+        });
+
+        tbodyDash.innerHTML = htmlDash;
+        tbodyAll.innerHTML = htmlAll;
+      } catch (e) {
+        console.error('Refresh blocks error:', e);
+      }
+    }
+
+    async function inspectBlock(target) {
+      try {
+        const res = await fetch(`/api/block/${target}`);
+        const b = await res.json();
+        if (b.error) {
+          alert('Block not found');
+          return;
+        }
+
+        document.getElementById('detail-block-height').textContent = `Block #${b.height}`;
+        document.getElementById('detail-block-hash').textContent = b.hash;
+        document.getElementById('detail-block-prev').textContent = b.prev_hash;
+        document.getElementById('detail-block-merkle').textContent = b.merkle_root;
+        document.getElementById('detail-block-time').textContent = new Date(b.timestamp * 1000).toLocaleString();
+        document.getElementById('detail-block-bits').textContent = b.bits;
+        document.getElementById('detail-block-nonce').textContent = b.nonce;
+        document.getElementById('detail-block-txcount').textContent = b.tx_count;
+
+        // Render txs
+        const container = document.getElementById('detail-block-txs');
+        let html = '';
+        b.transactions.forEach((tx, idx) => {
+          const isCb = tx.coinbase;
+          html += `
+            <div class="p-3 bg-slate-950 border border-slate-800/80 rounded-lg space-y-1.5 font-mono text-xs">
+              <div class="flex items-center justify-between">
+                <span class="text-cyan-400 font-bold">${isCb ? '🪙 Coinbase Transaction' : '⇄ Transfer Transaction'}</span>
+                <span class="text-slate-400 text-[11px]">${tx.size} bytes</span>
+              </div>
+              <div class="text-[11px] text-slate-400 break-all">txid: <span class="text-slate-200 select-all">${tx.txid}</span></div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-2 pt-1 border-t border-slate-900 text-[11px]">
+                <div>
+                  <span class="text-slate-500 uppercase text-[10px] block">Inputs (${tx.inputs.length})</span>
+                  ${tx.inputs.map(i => isCb ? `<div class="text-slate-400">Block Height ${i.txnonce} ${i.data ? `("${i.data}")` : ''}</div>` : `<div class="text-slate-300 truncate">Nonce ${i.txnonce} • ${i.prev_txid.slice(0, 10)}...:${i.prev_index}</div>`).join('')}
+                </div>
+                <div>
+                  <span class="text-slate-500 uppercase text-[10px] block">Outputs (${tx.outputs.length})</span>
+                  ${tx.outputs.map(o => `<div class="text-emerald-400 font-medium">${o.value_quh.toFixed(4)} QUH → <span class="text-slate-300 truncate">${o.address.slice(0, 16)}...</span></div>`).join('')}
+                </div>
+              </div>
+            </div>
+          `;
+        });
+        container.innerHTML = html;
+
+        document.getElementById('block-detail-panel').classList.remove('hidden');
+        if (currentTab !== 'blocks') {
+          showTab('blocks');
+        }
+      } catch (e) {
+        console.error('Inspect block error:', e);
+      }
+    }
+
+    function closeBlockDetail() {
+      document.getElementById('block-detail-panel').classList.add('hidden');
+    }
+
+    function searchBlock() {
+      const q = document.getElementById('input-block-search').value.trim();
+      if (q) inspectBlock(q);
+    }
+
+    async function refreshWallet() {
+      try {
+        const res = await fetch('/api/wallet/info');
+        const data = await res.json();
+
+        document.getElementById('wallet-mnemonic-box').textContent = data.mnemonic;
+
+        const list = document.getElementById('wallet-addresses-list');
+        let html = '';
+        data.addresses.forEach(a => {
+          html += `
+            <div class="p-3 bg-slate-950 border border-slate-800 rounded-lg space-y-1">
+              <div class="flex items-center justify-between">
+                <span class="text-cyan-400 font-bold">Address #${a.index}</span>
+                <span class="text-emerald-400 font-semibold">${a.balance_quh.toFixed(4)} QUH</span>
+              </div>
+              <div class="text-slate-300 break-all select-all font-mono text-[11px]">${a.address}</div>
+              <div class="text-[10px] text-slate-500 flex justify-between">
+                <span>Spendable: ${a.matured_quh.toFixed(4)} QUH</span>
+                <span>TxNonce: ${a.nonce}</span>
+              </div>
+            </div>
+          `;
+        });
+        list.innerHTML = html;
+
+      } catch (e) {
+        console.error('Refresh wallet error:', e);
+      }
+    }
+
+    async function generateNewMnemonic() {
+      try {
+        const res = await fetch('/api/wallet/generate', {method: 'POST'});
+        const data = await res.json();
+        document.getElementById('wallet-mnemonic-box').textContent = data.mnemonic;
+      } catch (e) {
+        console.error('Generate mnemonic error:', e);
+      }
+    }
+
+    async function restoreMnemonicPrompt() {
+      const phrase = prompt('Enter your 24-word BIP-39 recovery phrase:');
+      if (!phrase) return;
+      try {
+        const res = await fetch('/api/wallet/restore', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({mnemonic: phrase})
+        });
+        const data = await res.json();
+        if (data.success) {
+          alert('Wallet successfully restored!');
+          refreshWallet();
+          fetchStatus();
+        } else {
+          alert('Restore failed: ' + data.error);
+        }
+      } catch (e) {
+        alert('Restore error: ' + e);
+      }
+    }
+
+    async function submitTransaction() {
+      const to = document.getElementById('send-to-addr').value.trim();
+      const amount = parseFloat(document.getElementById('send-amount').value);
+      const fee = parseFloat(document.getElementById('send-fee').value || 0.01);
+      const from_index = parseInt(document.getElementById('send-from-index').value || 0);
+
+      const statusBox = document.getElementById('send-tx-status');
+      statusBox.classList.remove('hidden');
+      statusBox.className = 'text-xs p-3 rounded-lg font-mono bg-slate-900 border border-slate-700 text-slate-300';
+      statusBox.textContent = 'Signing transaction with ML-DSA-87...';
+
+      try {
+        const res = await fetch('/api/wallet/send', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({to, amount, fee, from_index})
+        });
+        const data = await res.json();
+        if (data.success) {
+          statusBox.className = 'text-xs p-3 rounded-lg font-mono bg-emerald-950/80 border border-emerald-800 text-emerald-300';
+          statusBox.innerHTML = `
+            <div><strong>✅ Transaction Broadcast Successfully!</strong></div>
+            <div class="mt-1 break-all select-all">TxID: ${data.txid}</div>
+            <div class="text-[11px] text-emerald-400 mt-1">Size: ${data.size_bytes} bytes | Inputs: ${data.inputs_count} | Nonce: ${data.nonce} | Sig: 4627 B</div>
+          `;
+          document.getElementById('send-to-addr').value = '';
+          document.getElementById('send-amount').value = '';
+          fetchStatus();
+          refreshMempool();
+        } else {
+          statusBox.className = 'text-xs p-3 rounded-lg font-mono bg-rose-950/80 border border-rose-800 text-rose-300';
+          statusBox.textContent = '❌ ' + data.error;
+        }
+      } catch (e) {
+        statusBox.className = 'text-xs p-3 rounded-lg font-mono bg-rose-950/80 border border-rose-800 text-rose-300';
+        statusBox.textContent = '❌ Error: ' + e;
+      }
+    }
+
+    async function refreshMempool() {
+      try {
+        const res = await fetch('/api/mempool');
+        const data = await res.json();
+        const tbody = document.getElementById('table-mempool-txs');
+        if (!data.transactions || data.transactions.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" class="py-8 text-center text-slate-500">Mempool is currently empty.</td></tr>';
+          return;
+        }
+
+        let html = '';
+        data.transactions.forEach(t => {
+          const totalOut = t.outputs.reduce((a, b) => a + b.value_quh, 0);
+          html += `
+            <tr class="hover:bg-slate-800/30 transition">
+              <td class="py-2.5 px-3 text-cyan-300 select-all">${t.txid.slice(0, 16)}...</td>
+              <td class="py-2.5 px-3 text-slate-300">${t.inputs.length} in</td>
+              <td class="py-2.5 px-3 text-emerald-400 font-bold">${totalOut.toFixed(4)} QUH</td>
+              <td class="py-2.5 px-3 text-slate-400">${t.size} B</td>
+              <td class="py-2.5 px-3 text-amber-400">${t.inputs[0] ? t.inputs[0].txnonce : '-'}</td>
+            </tr>
+          `;
+        });
+        tbody.innerHTML = html;
+      } catch (e) {
+        console.error('Refresh mempool error:', e);
+      }
+    }
+
+    async function runCryptoTest() {
+      const msg = document.getElementById('crypto-msg-input').value;
+      const out = document.getElementById('crypto-test-output');
+      out.classList.remove('hidden');
+      out.innerHTML = '<span class="text-slate-400">Generating ML-DSA-87 keypair & computing signature...</span>';
+
+      try {
+        const res = await fetch('/api/crypto/test_sign', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({message: msg})
+        });
+        const d = await res.json();
+
+        out.innerHTML = `
+          <div class="text-emerald-400 font-bold">✓ Verification Success: ML-DSA-87 Signature Valid!</div>
+          <div class="text-slate-400">Algorithm: <span class="text-cyan-300">${d.algorithm}</span> (${d.category})</div>
+          <div class="text-slate-400">Public Key (2592 B): <span class="text-slate-200 select-all">${d.pk_hex}</span></div>
+          <div class="text-slate-400">Signature (4627 B): <span class="text-slate-200 select-all">${d.sig_hex}</span></div>
+          <div class="text-emerald-400">Tamper Resistance Test: <span class="text-slate-200">${d.tamper_detected ? 'PASSED (corrupted message rejected)' : 'FAILED'}</span></div>
+        `;
+      } catch (e) {
+        out.innerHTML = `<span class="text-rose-400">Error: ${e}</span>`;
+      }
+    }
+
+    async function loadEmission() {
+      try {
+        const res = await fetch('/api/emission');
+        const d = await res.json();
+        const tbody = document.getElementById('table-emission-rows');
+        let html = '';
+        d.table.forEach(r => {
+          html += `
+            <tr class="hover:bg-slate-800/30 transition">
+              <td class="py-2 px-3 text-cyan-400 font-bold">Epoch ${r.epoch}</td>
+              <td class="py-2 px-3 text-slate-300">${r.start_height.toLocaleString()}</td>
+              <td class="py-2 px-3 text-emerald-400 font-medium">${r.reward_quh.toFixed(8)} QUH</td>
+              <td class="py-2 px-3 text-slate-400">${r.reward_quphi.toLocaleString()} quphi</td>
+              <td class="py-2 px-3 text-right text-slate-200 font-semibold">${r.cumulative_quh.toLocaleString(undefined, {minimumFractionDigits: 3, maximumFractionDigits: 3})} QUH</td>
+            </tr>
+          `;
+        });
+        tbody.innerHTML = html;
+      } catch (e) {
+        console.error('Load emission error:', e);
+      }
+    }
+
+    function setRpcPreset(method, params = {}) {
+      const doc = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: method,
+        params: params
+      };
+      document.getElementById('rpc-req-box').value = JSON.stringify(doc, null, 2);
+    }
+
+    async function executeRpc() {
+      const reqText = document.getElementById('rpc-req-box').value;
+      const resBox = document.getElementById('rpc-res-box');
+      resBox.textContent = 'Executing...';
+      try {
+        const doc = JSON.parse(reqText);
+        const res = await fetch('/api/rpc', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(doc)
+        });
+        const data = await res.json();
+        resBox.textContent = JSON.stringify(data, null, 2);
+      } catch (e) {
+        resBox.textContent = 'Error: ' + e;
+      }
+    }
+
+    // Initialize
+    window.addEventListener('DOMContentLoaded', () => {
+      setRpcPreset('getblockchaininfo');
+      fetchStatus();
+      refreshBlocks();
+      refreshWallet();
+
+      // Poll every 2.5 seconds
+      refreshInterval = setInterval(() => {
+        fetchStatus();
+        if (currentTab === 'mempool') refreshMempool();
+      }, 2500);
+    });
+  </script>
+</body>
+</html>

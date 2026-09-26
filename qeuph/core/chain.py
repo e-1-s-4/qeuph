@@ -164,6 +164,12 @@ class ChainManager:
         if block.header.bits != expected_bits:
             raise BlockValidationError(
                 f"bits {hex(block.header.bits)} != required {hex(expected_bits)}")
+        # checkpoint check
+        if self.network.is_mainnet and block.height in C.CHECKPOINTS:
+            if block.hash != C.CHECKPOINTS[block.height]:
+                raise BlockValidationError(
+                    f"block at height {block.height} hash {block.hash.hex()} "
+                    f"does not match checkpoint {C.CHECKPOINTS[block.height].hex()}")
         fees = validate_block(block, self.tip, self.state, self.network.block_time,
                               self.network.retarget_interval,
                               current_time=current_time)

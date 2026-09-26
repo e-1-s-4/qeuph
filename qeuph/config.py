@@ -53,6 +53,7 @@ TESTNET = dataclasses.replace(
     hrp=C.ADDRESS_HRP_TESTNET,
     p2p_port=29090,
     rpc_port=29091,
+    genesis_bits=0x3F0FFFFF,
     genesis_timestamp=1780000000,
     data_dir=os.path.expanduser("~/.qeuph-testnet"),
 )

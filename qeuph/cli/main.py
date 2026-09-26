@@ -81,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
     w_addr.add_argument("--network", default="mainnet")
     w_addr.add_argument("--index", type=int, default=0)
 
+    w_mnem = wsub.add_parser("mnemonic", help="show 24-word backup phrase")
+    w_mnem.add_argument("--path", default=None)
+    w_mnem.add_argument("--passphrase", default=None)
+    w_mnem.add_argument("--network", default="mainnet")
+
     # chain -------------------------------------------------------------
     chain = sub.add_parser("chain", help="offline chain inspection")
     csub = chain.add_subparsers(dest="ccmd", required=True)
@@ -182,6 +187,10 @@ def cmd_wallet(args):
         txid = w.send_transaction(tx, args.rpc)
         print(f"sent {args.amount} QUH -> {args.to}")
         print(f"txid: {txid}")
+    elif args.wcmd == "mnemonic":
+        phrase = w.to_mnemonic()
+        print("24-word recovery phrase (KEEP SECRET):")
+        print(phrase)
 
 
 def cmd_chain(args):

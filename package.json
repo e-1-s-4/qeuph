@@ -1,0 +1,13 @@
+{
+  "name": "qeuph",
+  "version": "1.0.0",
+  "description": "Mainnet-ready post-quantum cryptocurrency node suite featuring ML-DSA-87 (FIPS 204) lattice signatures, double SHA3-512 proof-of-work, Bech32m addresses, UTXO + txnonce hybrid consensus, two-thirding emission, encrypted wallet, RPC, and node explorer.",
+  "scripts": {
+    "dev": "python3 -m qeuph.web.server",
+    "build": "python3 -m qeuph.web.build",
+    "start": "python3 -m qeuph.web.server",
+    "test": "python3 -m pytest tests/"
+  },
+  "author": "e-1-s-4",
+  "license": "MIT"
+}

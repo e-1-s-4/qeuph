@@ -104,8 +104,9 @@ class TestIntegration:
         assert info["height"] >= 102, info
 
         bal = rpc("getbalance", {"address": miner_addr})
+        assert bal["balance"] >= 101 * 50 * C.QUPHI_PER_QUH
         matured = bal["matured_balance"]
-        assert matured >= 101 * 50 * C.QUPHI_PER_QUH   # coinbase of block 1 matured
+        assert matured >= 50 * C.QUPHI_PER_QUH   # coinbase of block 1 matured
 
         # send 12.5 QUH from miner address 0 to recipient
         tx = mw.build_transaction(

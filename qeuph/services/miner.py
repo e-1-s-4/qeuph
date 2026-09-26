@@ -102,6 +102,9 @@ class SoloMiner:
         max_attempts = 1 << 28
         found = None
         while attempts < max_attempts and self._running.is_set():
+            # Check for stale tip every 1024 hashes
+            if attempts & 1023 == 0 and chain.tip.hash != block.header.prev_hash:
+                break
             nonce = attempts
             blob = prefix + nonce.to_bytes(16, "little")
             self._hash_count += 1

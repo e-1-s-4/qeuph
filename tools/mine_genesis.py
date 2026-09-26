@@ -5,10 +5,10 @@ satisfies mainnet initial difficulty (bits 0x3D0FFFFF) and is embedded
 into qeuph/core/genesis.py so every node reconstructs the identical block.
 """
 import multiprocessing as mp
+import os
 import sys
-import time
 
-sys.path.insert(0, "/home/z/my-project/download/qeuph")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from qeuph.config import MAINNET
 from qeuph.core import pow as pow_mod

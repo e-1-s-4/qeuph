@@ -30,6 +30,8 @@ NULL_ADDR_HASH = dhash(b"")
 # ~0.91 MH/s over 407 s).  Every node rebuilds the identical block from
 # this constant, so no node ever needs to mine genesis at startup.
 MAINNET_GENESIS_NONCE = 355026620
+TESTNET_GENESIS_NONCE = 25
+REGTEST_GENESIS_NONCE = 0
 
 MAINNET_GENESIS_HASH = bytes.fromhex(
     "0000000d2f105b239cd085e9d4bd7fa087dc6a085ee37b3842d539ab9c974247"
@@ -40,12 +42,16 @@ def build_genesis(network: Network, mine: bool = True,
                   nonce: Optional[int] = None) -> Block:
     """Assemble (and mine) the genesis block for a network.
 
-    For mainnet the pinned winning nonce is used, so the block is always
-    identical and satisfies mainnet difficulty without re-mining.
+    For mainnet, testnet, and regtest the pinned winning nonce is used by default,
+    so the block is always deterministic and satisfies difficulty without re-mining.
     """
-    from qeuph.config import MAINNET
-    if nonce is None and network.name == MAINNET.name:
-        nonce = MAINNET_GENESIS_NONCE
+    if nonce is None:
+        if network.name == "mainnet":
+            nonce = MAINNET_GENESIS_NONCE
+        elif network.name == "testnet":
+            nonce = TESTNET_GENESIS_NONCE
+        elif network.name == "regtest":
+            nonce = REGTEST_GENESIS_NONCE
     from qeuph.core.tx import ZERO_TXID, COINBASE_INDEX, MAX_COINBASE_DATA
     msg = network.genesis_message.encode()
     if len(msg) > MAX_COINBASE_DATA:

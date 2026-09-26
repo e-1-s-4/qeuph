@@ -16,7 +16,9 @@ from qeuph.core.state import UTXO
 from qeuph.core.tx import Transaction, TxIn, TxOut
 from qeuph.crypto import address as addr_mod
 from qeuph.wallet import keystore
+from qeuph.wallet.keystore import WalletError
 from qeuph.wallet.keys import KeyStore, derive_key
+from qeuph.wallet import mnemonic as mnemonic_mod
 
 
 class Wallet:
@@ -31,6 +33,14 @@ class Wallet:
     def create(cls, hrp: str = "quh", network: str = "mainnet") -> "Wallet":
         import os
         return cls(os.urandom(32), hrp, network)
+
+    @classmethod
+    def from_mnemonic(cls, phrase: str, hrp: str = "quh", network: str = "mainnet") -> "Wallet":
+        seed = mnemonic_mod.mnemonic_to_entropy(phrase)
+        return cls(seed, hrp, network)
+
+    def to_mnemonic(self) -> str:
+        return mnemonic_mod.entropy_to_mnemonic(self.master_seed)
 
     @classmethod
     def open(cls, path: str, passphrase: Optional[str] = None,
@@ -53,10 +63,11 @@ class Wallet:
     # ------------------------------------------------------------------
     # UTXO lookups (via RPC when available)
     # ------------------------------------------------------------------
-    def fetch_utxos(self, address: str, rpc_url: Optional[str]) -> List[Tuple[bytes, int, int]]:
+    def fetch_utxos(self, address: str, rpc_url: Optional[str],
+                    matured_only: bool = True) -> List[Tuple[bytes, int, int]]:
         """[(txid, index, value)] for an address."""
         if rpc_url:
-            res = _rpc(rpc_url, "listutxos", {"address": address})
+            res = _rpc(rpc_url, "listutxos", {"address": address, "matured_only": matured_only})
             return [(bytes.fromhex(u["txid"]), u["index"], u["value"])
                     for u in res.get("utxos", [])]
         raise WalletError("no rpc_url provided for UTXO lookup")
@@ -85,10 +96,7 @@ class Wallet:
         sender_hash = addr_mod.address_to_hash(sender_addr, self.hrp)
         if sender_hash is None:
             raise WalletError("bad sender address (hrp mismatch?)")
-        utxos = self.fetch_utxos(sender_addr, rpc_url)
-        if maturity_height is not None:
-            # caller filters immature coinbase outputs when needed
-            pass
+        utxos = self.fetch_utxos(sender_addr, rpc_url, matured_only=True)
         total = sum(v for _, _, v in utxos)
         pay = sum(v for _, v in recipients)
         if total < pay + fee:
@@ -134,12 +142,19 @@ class Wallet:
 
 # ---------------------------------------------------------------------------
 def _rpc(rpc_url: str, method: str, params: dict) -> dict:
+    import urllib.error
     payload = json.dumps({"jsonrpc": "2.0", "id": 1,
                           "method": method, "params": params}).encode()
     req = urllib.request.Request(rpc_url, data=payload,
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        doc = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            doc = json.loads(resp.read())
+    except urllib.error.HTTPError as err:
+        try:
+            doc = json.loads(err.read().decode())
+        except Exception:
+            raise WalletError(f"HTTP {err.code}: {err.reason}")
     if "error" in doc and doc["error"]:
         raise WalletError(f"rpc error: {doc['error']}")
     return doc.get("result", {})

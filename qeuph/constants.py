@@ -103,5 +103,10 @@ GENESIS_TIMESTAMP = 1790812800
 GENESIS_MESSAGE = ("26/Sep/2026 The quantum era demands quantum-resistant money. "
                    "Qeuph: ML-DSA-87 + SHA3-512, two-thirding to 31.5M QUH.")
 
-# Checkpoint seeds are empty at genesis; populated by releases.
-CHECKPOINTS = {}
+# Checkpoint seeds: block height -> block hash (64 bytes)
+CHECKPOINTS = {
+    0: bytes.fromhex(
+        "0000000d2f105b239cd085e9d4bd7fa087dc6a085ee37b3842d539ab9c974247"
+        "fa8c4000695807b0a5d306d40c713e32b130387f72b64a00bf2b0c9953b179b1"
+    )
+}

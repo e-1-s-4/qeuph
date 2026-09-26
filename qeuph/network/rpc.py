@@ -54,6 +54,14 @@ class RPCService:
             def log_message(self, fmt, *args):
                 pass
 
+            def do_OPTIONS(self):
+                self.send_response(200)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length)
@@ -74,6 +82,9 @@ class RPCService:
                 payload = json.dumps(doc).encode()
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
@@ -96,16 +107,119 @@ class RPCService:
 
         if method == "getblockchaininfo":
             from qeuph.core import pow as pow_mod
+            from qeuph import constants as C
+            tip = chain.tip
             return {
                 "chain": net.name,
+                "blocks": chain.height(),
+                "headers": chain.height(),
                 "height": chain.height(),
                 "best": chain.tip_hash().hex(),
-                "difficulty": pow_mod.difficulty_from_bits(chain.tip.header.bits),
-                "bits": hex(chain.tip.header.bits),
+                "bestblockhash": chain.tip_hash().hex(),
+                "difficulty": pow_mod.difficulty_from_bits(tip.header.bits),
+                "bits": hex(tip.header.bits),
+                "mediantime": tip.header.timestamp,
+                "chainwork": hex(chain.tip_work),
                 "synced": self.node.synced,
                 "peers": len(self.node.peers),
                 "reward": chain.block_reward(),
+                "reward_quh": chain.block_reward() / C.QUPHI_PER_QUH,
+                "max_supply": C.MAX_SUPPLY_QUH,
+                "mempool_size": len(self.node.mempool),
             }
+        if method == "getblockcount":
+            return chain.height()
+        if method == "getbestblockhash":
+            return chain.tip_hash().hex()
+        if method == "getdifficulty":
+            from qeuph.core import pow as pow_mod
+            return pow_mod.difficulty_from_bits(chain.tip.header.bits)
+        if method == "getnetworkinfo":
+            from qeuph import constants as C
+            return {
+                "version": C.VERSION,
+                "protocolversion": C.PROTOCOL_VERSION,
+                "network": net.name,
+                "p2p_port": net.p2p_port,
+                "rpc_port": net.rpc_port,
+                "connections": len(self.node.peers),
+                "relayfee": C.MIN_RELAY_FEE_RATE,
+            }
+        if method == "validateaddress":
+            from qeuph.crypto import address as addr_mod
+            addr = params.get("address", "")
+            ahash = addr_mod.address_to_hash(addr, hrp)
+            is_valid = ahash is not None and len(ahash) == 64
+            return {
+                "isvalid": is_valid,
+                "address": addr,
+                "hrp": hrp,
+                "addr_hash": ahash.hex() if is_valid else None,
+            }
+        if method == "estimatefee":
+            from qeuph import constants as C
+            return {"fee_rate_quphi_per_kb": C.MIN_RELAY_FEE_RATE}
+        if method == "decoderawtransaction":
+            raw_hex = params.get("hex", "")
+            try:
+                tx = Transaction.deserialize(bytes.fromhex(raw_hex))
+                return tx.to_dict(hrp)
+            except Exception as e:
+                raise _RpcError(-32002, f"cannot decode raw transaction: {e}")
+        if method == "getrawtransaction":
+            try:
+                txid = bytes.fromhex(params["txid"])
+            except (KeyError, ValueError):
+                raise _RpcError(-32002, "bad txid")
+            verbose = bool(params.get("verbose", False))
+            mp = self.node.mempool.get_tx(txid)
+            if mp is not None:
+                return mp.to_dict(hrp) if verbose else mp.serialize().hex()
+            if chain.store is not None:
+                loc = chain.store.get_tx_block(txid)
+                if loc is not None:
+                    height, bh = loc
+                    blk = chain.get_block(bh)
+                    for tx in (blk.transactions if blk else []):
+                        if tx.txid() == txid:
+                            return tx.to_dict(hrp) if verbose else tx.serialize().hex()
+            raise _RpcError(-32001, "transaction not found")
+        if method == "gettxout":
+            try:
+                txid = bytes.fromhex(params["txid"])
+                idx = int(params["index"])
+            except (KeyError, ValueError):
+                raise _RpcError(-32002, "invalid txid or index")
+            u = state.get_utxo(txid, idx)
+            if u is None:
+                return None
+            from qeuph.crypto import address as addr_mod
+            from qeuph import constants as C
+            confs = chain.height() - u.cb_height + 1 if u.is_coinbase else chain.height() + 1
+            return {
+                "bestblock": chain.tip_hash().hex(),
+                "confirmations": confs,
+                "value": u.value,
+                "value_quh": u.value / C.QUPHI_PER_QUH,
+                "address": addr_mod.hash_to_address(u.addr_hash, hrp),
+                "coinbase": u.is_coinbase,
+            }
+        if method == "generate":
+            if net.name == "mainnet":
+                raise _RpcError(-32021, "generate not allowed on mainnet")
+            nblocks = int(params.get("nblocks", 1))
+            addr = params.get("address", "")
+            from qeuph.crypto import address as addr_mod
+            ahash = addr_mod.address_to_hash(addr, hrp) if addr else bytes(64)
+            hashes = []
+            for _ in range(nblocks):
+                txs = self.node.mempool.best_transactions(2_000_000)
+                b, _ = chain.create_block_template(ahash, txs)
+                b.mine()
+                chain.connect_block(b)
+                self.node.mempool.on_new_block(b)
+                hashes.append(b.hash.hex())
+            return {"hashes": hashes, "height": chain.height()}
         if method == "getblockhash":
             h = int(params.get("height"))
             b = chain.get_block_by_height(h)
@@ -177,7 +291,8 @@ class RPCService:
                         "matured_balance": state.balance(ahash, chain.height(),
                                                          matured_only=True)}
             if method == "listutxos":
-                rows = state.utxos_for(ahash, chain.height())
+                matured_only = bool(params.get("matured_only", False))
+                rows = state.utxos_for(ahash, chain.height(), matured_only=matured_only)
                 return {"utxos": [{
                     "txid": t.hex(), "index": i, "value": u.value,
                     "is_coinbase": u.is_coinbase,
