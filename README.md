@@ -4,6 +4,9 @@ A complete, quantum-resistant cryptocurrency node suite.  Qeuph is a hybrid
 port of the [QRL](https://github.com/theQRL/QRL) (Quantum Resistant Ledger)
 architecture — the first serious post-quantum ledger — rebuilt around:
 
+# Whitepaper
+https://drive.google.com/file/d/1fTAz37Bgkw51UXLaEQ6ZJWVhvhO92wPc/view?usp=sharing
+
 | Property | Value |
 |---|---|
 | Signatures | **ML-DSA-87** (FIPS 204, NIST Category 5) |
