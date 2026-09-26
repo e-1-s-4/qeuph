@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qeuph"
+version = "1.0.0"
+description = "Qeuph (QUH): quantum-resistant cryptocurrency with ML-DSA-87, SHA3-512 PoW and two-thirding rewards"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Qeuph contributors" }]
+keywords = ["blockchain", "post-quantum", "ml-dsa", "fips204", "cryptocurrency"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Security :: Cryptography",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = []
+
+[project.optional-dependencies]
+fast = ["cryptography>=45"]      # OpenSSL ML-DSA-87 backend
+dev = ["pytest>=7", "cryptography>=45"]
+
+[project.scripts]
+qeuph = "qeuph.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["qeuph*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,6 +1,8 @@
 MIT License
 
-Copyright (c) 2026 E1S4
+Copyright (c) 2026 Qeuph contributors
+Architecture derived from the QRL (Quantum Resistant Ledger) project,
+Copyright (c) 2017-2024 the QRL, also MIT licensed.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
