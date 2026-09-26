@@ -125,6 +125,7 @@ class NodeManager:
                 "mining": self.miner.is_mining(),
                 "hashrate": round(self.miner.hashrate(), 2),
                 "blocks_mined": self.miner.blocks_mined,
+                "threads": getattr(self.miner, "threads", 1),
                 "payout_address": self.miner.payout_address_hex,
                 "wallet_address": wallet_addr,
                 "wallet_balance_quphi": balance,
@@ -175,6 +176,9 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             self.handle_single_tx(txid)
         elif path == "/api/wallet/info":
             self.handle_wallet_info()
+        elif path.startswith("/api/address/"):
+            target_addr = path.replace("/api/address/", "").strip()
+            self.handle_single_address(target_addr)
         elif path == "/api/emission":
             from qeuph.core import reward as reward_mod
             rows = reward_mod.emission_table()
@@ -206,6 +210,19 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             self.handle_rpc(data)
         elif path == "/api/miner/toggle":
             self.handle_miner_toggle(data)
+        elif path == "/api/miner/threads":
+            th = max(1, min(16, int(data.get("threads", 1))))
+            if NODE.miner:
+                NODE.miner.set_threads(th)
+            self.send_json({"success": True, "threads": th})
+        elif path == "/api/miner/payout":
+            payout = data.get("address", "").strip()
+            ahash = addr_mod.address_to_hash(payout, NODE.network.hrp)
+            if ahash:
+                NODE.miner.set_payout(ahash)
+                self.send_json({"success": True, "payout": payout})
+            else:
+                self.send_json({"success": False, "error": f"Invalid {NODE.network.hrp} address"}, code=400)
         elif path == "/api/network/switch":
             net_name = data.get("network", "regtest")
             NODE.init_node(net_name)
@@ -347,6 +364,38 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
                         self.send_json(d)
                         return
         self.send_json({"error": "Transaction not found"}, code=404)
+
+    def handle_single_address(self, addr_str: str):
+        hrp = NODE.network.hrp
+        ahash = addr_mod.address_to_hash(addr_str, hrp)
+        if not ahash or len(ahash) != 64:
+            self.send_json({"error": f"Invalid {hrp} address"}, code=400)
+            return
+        h = NODE.chain.height()
+        bal = NODE.chain.state.balance(ahash, h)
+        mbal = NODE.chain.state.balance(ahash, h, matured_only=True)
+        nonce = NODE.chain.state.nonce_of(ahash)
+        utxos = NODE.chain.state.utxos_for(ahash, h)
+        self.send_json({
+            "address": addr_str,
+            "network": NODE.network.name,
+            "hrp": hrp,
+            "addr_hash": ahash.hex(),
+            "balance_quphi": bal,
+            "balance_quh": bal / C.QUPHI_PER_QUH,
+            "matured_quphi": mbal,
+            "matured_quh": mbal / C.QUPHI_PER_QUH,
+            "nonce": nonce,
+            "utxos_count": len(utxos),
+            "utxos": [{
+                "txid": txid.hex(),
+                "index": idx,
+                "value_quh": u.value / C.QUPHI_PER_QUH,
+                "value_quphi": u.value,
+                "is_coinbase": u.is_coinbase,
+                "confirmations": h - u.cb_height + 1 if u.is_coinbase else h + 1
+            } for txid, idx, u in utxos[:50]]
+        })
 
     def handle_wallet_info(self):
         w = NODE.wallet

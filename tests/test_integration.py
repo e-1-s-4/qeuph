@@ -157,3 +157,35 @@ class TestIntegration:
         assert info["difficulty"] > 0
         r = rpc("getrewardinfo", {"height": 210_000})
         assert r["reward"] == 3_333_333_333
+
+    def test_advanced_rpc_methods(self, daemon):
+        # 1. help
+        h = rpc("help")
+        assert "blockchain" in h and "mining" in h and "getblocktemplate" in h["mining"]
+
+        # 2. getblocktemplate
+        tmpl = rpc("getblocktemplate")
+        assert tmpl["height"] > 0
+        assert "previousblockhash" in tmpl
+        assert tmpl["coinbasevalue"] > 0
+
+        # 3. getaddressinfo
+        from qeuph.wallet import Wallet
+        w = Wallet.create(hrp="rquh", network="regtest")
+        addr = w.address_at(0)
+        ainfo = rpc("getaddressinfo", {"address": addr})
+        assert ainfo["address"] == addr
+        assert ainfo["balance"] == 0
+        assert ainfo["nonce"] == 0
+
+        # 4. createrawtransaction
+        raw = rpc("createrawtransaction", {
+            "inputs": [{"txid": "00" * 64, "index": 0, "nonce": 1}],
+            "outputs": [{addr: 1.5}]
+        })
+        assert "hex" in raw and "txid" in raw
+
+        # 5. getmininginfo
+        minfo = rpc("getmininginfo")
+        assert "mining" in minfo and "chain" in minfo
+        assert minfo["chain"] == "regtest"

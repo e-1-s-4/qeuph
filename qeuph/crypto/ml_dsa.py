@@ -49,6 +49,9 @@ def generate_seed() -> bytes:
     return os.urandom(SEED_SIZE)
 
 
+import functools
+
+@functools.lru_cache(maxsize=1024)
 def keypair_from_seed(seed: bytes) -> Tuple[bytes, bytes]:
     """Deterministic (pk, sk) from a 32-byte seed (FIPS 204 seeded keygen)."""
     if len(seed) != SEED_SIZE:

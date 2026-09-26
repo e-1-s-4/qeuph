@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS tx_index (
     hash BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tx_index_height ON tx_index(height);
+CREATE TABLE IF NOT EXISTS main_chain (
+    height INTEGER PRIMARY KEY,
+    hash BLOB NOT NULL
+);
 """
 
 
@@ -106,8 +110,30 @@ class Store:
                                    (block_hash,)).fetchone()
             return None if row is None else Block.deserialize(row[0])
 
+    def set_main_block(self, height: int, block_hash: bytes):
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO main_chain VALUES (?, ?)", (height, block_hash))
+            self._db.commit()
+
+    def truncate_main_chain(self, from_height: int):
+        with self._lock:
+            self._db.execute("DELETE FROM main_chain WHERE height >= ?", (from_height,))
+            self._db.commit()
+
+    def get_main_hash_at_height(self, height: int) -> Optional[bytes]:
+        with self._lock:
+            row = self._db.execute("SELECT hash FROM main_chain WHERE height=?", (height,)).fetchone()
+            return None if row is None else row[0]
+
     def get_block_by_height(self, height: int) -> Optional[Block]:
         with self._lock:
+            # Query canonical block on main chain first
+            row = self._db.execute(
+                "SELECT b.raw FROM main_chain m JOIN blocks b ON m.hash = b.hash WHERE m.height=?",
+                (height,)).fetchone()
+            if row is not None:
+                return Block.deserialize(row[0])
+            # Fallback for unindexed or single block
             row = self._db.execute("SELECT raw FROM blocks WHERE height=? ORDER BY hash LIMIT 1",
                                    (height,)).fetchone()
             return None if row is None else Block.deserialize(row[0])

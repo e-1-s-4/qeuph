@@ -54,6 +54,7 @@ class ChainManager:
     def _init_genesis(self):
         assert self.store is not None
         self.store.put_block(self.genesis, self.tip_work)
+        self.store.set_main_block(0, self.genesis.hash)
         self.state.apply_block(self.genesis)
         self.store.save_state(self.state, self.genesis.hash, 0)
 
@@ -180,6 +181,7 @@ class ChainManager:
         self._timestamps.append(block.header.timestamp)
         if self.store is not None:
             self.store.put_block(block, self.tip_work)
+            self.store.set_main_block(block.height, block.hash)
             self.store.save_state(self.state, self.tip.hash, self.tip.height)
         return fees
 
@@ -221,16 +223,40 @@ class ChainManager:
             new_line.append(cur)
             cur = self._parent_opt(cur)
         ancestor = cur
-        # replay: rebuild state from ancestor through new_line
+
+        # Replay: rebuild state from genesis up to ancestor, then through new_line
+        ancestor_line = []
+        cur = ancestor
+        while cur is not None and cur.hash != self.genesis.hash:
+            ancestor_line.append(cur)
+            cur = self._parent_opt(cur)
+        ancestor_line.reverse()
+
         self.state = ChainState()
-        self.tip = ancestor if ancestor is not None else self.genesis
-        self.tip_work = self.store.get_work(self.tip.hash) if self.store else 0
-        self._timestamps = self._collect_timestamps(self.tip)
+        self.state.apply_block(self.genesis)
+        self.tip = self.genesis
+        self.tip_work = self._block_work(self.genesis)
+        self._timestamps = [self.genesis.header.timestamp]
+
+        if self.store is not None:
+            self.store.truncate_main_chain(1)
+
+        for blk in ancestor_line:
+            self.state.apply_block(blk)
+            self.tip = blk
+            self.tip_work += self._block_work(blk)
+            self._timestamps.append(blk.header.timestamp)
+            if self.store is not None:
+                self.store.set_main_block(blk.height, blk.hash)
+
         for blk in reversed(new_line):
             self.state.apply_block(blk)
             self.tip = blk
             self.tip_work += self._block_work(blk)
             self._timestamps.append(blk.header.timestamp)
+            if self.store is not None:
+                self.store.set_main_block(blk.height, blk.hash)
+
         if self.store is not None:
             self.store.save_state(self.state, self.tip.hash, self.tip.height)
 
@@ -252,16 +278,23 @@ class ChainManager:
                               timestamp: Optional[int] = None) -> Tuple[Block, int]:
         """Assemble an unmined block on the current tip."""
         fees = 0
+        working_utxos = {}
         for tx in transactions:
             if tx.is_coinbase:
                 raise ValueError("coinbase in template tx list")
-            # fee accounting done by the caller via mempool
+            # fee accounting with chained UTXO resolution
             total_in = 0
             for inp in tx.inputs:
-                u = self.state.get_utxo(inp.prev_txid, inp.prev_index)
-                if u is not None:
-                    total_in += u.value
-            fees += total_in - tx.total_out
+                op = (inp.prev_txid, inp.prev_index)
+                if op in working_utxos:
+                    total_in += working_utxos[op].value
+                else:
+                    u = self.state.get_utxo(inp.prev_txid, inp.prev_index)
+                    if u is not None:
+                        total_in += u.value
+            fees += max(0, total_in - tx.total_out)
+            for idx, out in enumerate(tx.outputs):
+                working_utxos[(tx.txid(), idx)] = out
         reward = self.coinbase_reward_with_fees(fees)
         from qeuph.core.tx import make_coinbase
         coinbase = make_coinbase(self.tip.height + 1, coinbase_addr_hash, reward)

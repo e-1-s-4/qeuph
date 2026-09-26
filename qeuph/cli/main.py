@@ -104,6 +104,21 @@ def build_parser() -> argparse.ArgumentParser:
     gen.add_argument("--network", default="mainnet")
     sub.add_parser("emission", help="print the two-thirding reward schedule")
     sub.add_parser("version", help="print versions")
+
+    # RPC client --------------------------------------------------------
+    rpc_p = sub.add_parser("rpc", help="invoke JSON-RPC method")
+    rpc_p.add_argument("method", help="RPC method name (e.g. getblockchaininfo)")
+    rpc_p.add_argument("params", nargs="?", default="{}", help="JSON params object or string")
+    rpc_p.add_argument("--url", default="http://127.0.0.1:19091/", help="RPC endpoint URL")
+
+    # Address / Crypto tools -------------------------------------------
+    addr_p = sub.add_parser("address", help="address utilities")
+    addr_p.add_argument("action", choices=["validate", "info"], help="action to perform")
+    addr_p.add_argument("target", help="Bech32m address to inspect")
+    addr_p.add_argument("--network", default="mainnet", help="network context")
+
+    cry_p = sub.add_parser("crypto", help="FIPS 204 crypto utilities")
+    cry_p.add_argument("action", choices=["keygen", "test", "info"], help="action")
     return p
 
 
@@ -266,6 +281,89 @@ def cmd_emission(_args):
           f"({exact / C.QUPHI_PER_QUH:.8f} QUH)")
 
 
+def cmd_rpc(args):
+    import urllib.request
+    import urllib.error
+    url = args.url
+    params = {}
+    if args.params:
+        try:
+            params = json.loads(args.params)
+        except Exception:
+            params = args.params
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": args.method, "params": params}).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            doc = json.loads(resp.read().decode())
+            if "result" in doc:
+                print(json.dumps(doc["result"], indent=2))
+            else:
+                print(json.dumps(doc, indent=2))
+    except urllib.error.HTTPError as err:
+        try:
+            print(json.dumps(json.loads(err.read().decode()), indent=2))
+        except Exception:
+            print(f"HTTP {err.code}: {err.reason}")
+    except Exception as e:
+        print(f"RPC connection failed ({url}): {e}")
+
+
+def cmd_address(args):
+    from qeuph.crypto import address as addr_mod
+    net = get_network(args.network)
+    addr = args.target.strip()
+    ahash = addr_mod.address_to_hash(addr, net.hrp)
+    is_valid = ahash is not None and len(ahash) == 64
+    if args.action == "validate":
+        print(json.dumps({
+            "address": addr,
+            "network": net.name,
+            "hrp": net.hrp,
+            "valid": is_valid,
+            "addr_hash": ahash.hex() if is_valid else None
+        }, indent=2))
+    elif args.action == "info":
+        if not is_valid:
+            print(f"Invalid {net.hrp} address")
+            sys.exit(1)
+        print(f"Address:   {addr}")
+        print(f"HRP:       {net.hrp}")
+        print(f"Hash (64B):{ahash.hex()}")
+        print(f"Encoding:  Bech32m (BIP-350)")
+
+
+def cmd_crypto(args):
+    from qeuph.crypto import ml_dsa
+    if args.action == "keygen":
+        seed, pk, sk = ml_dsa.generate_keypair()
+        from qeuph.crypto import address as addr_mod
+        from qeuph import constants as C
+        addr = addr_mod.pk_to_address(pk, C.ADDRESS_HRP_MAINNET)
+        print("ML-DSA-87 (FIPS 204) Keypair:")
+        print(f"Master Seed: {seed.hex()}")
+        print(f"Public Key:  {pk.hex()[:64]}... ({len(pk)} bytes)")
+        print(f"Secret Key:  {sk.hex()[:64]}... ({len(sk)} bytes)")
+        print(f"Mainnet Addr:{addr}")
+    elif args.action == "test":
+        print("Running FIPS 204 ML-DSA-87 Roundtrip...")
+        msg = b"Qeuph Post-Quantum Cryptographic Verification"
+        seed, pk, sk = ml_dsa.generate_keypair()
+        sig = ml_dsa.sign(sk, msg)
+        valid = ml_dsa.verify(pk, msg, sig)
+        tamper = ml_dsa.verify(pk, msg + b"X", sig)
+        print(f"Backend:  {ml_dsa.backend_name()}")
+        print(f"Verified: {valid}")
+        print(f"Tamper detected: {not tamper}")
+    elif args.action == "info":
+        print("FIPS 204 ML-DSA-87 Parameters (NIST Category 5):")
+        print(f"Backend:     {ml_dsa.backend_name()}")
+        print(f"PK Size:     {ml_dsa.PK_SIZE} bytes")
+        print(f"SK Size:     {ml_dsa.SK_SIZE} bytes")
+        print(f"Sig Size:    {ml_dsa.SIG_SIZE} bytes")
+        print("Security:    256-bit Post-Quantum Lattice (Module-LWE/SIS)")
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -279,6 +377,12 @@ def main(argv=None):
         cmd_genesis(args)
     elif args.cmd == "emission":
         cmd_emission(args)
+    elif args.cmd == "rpc":
+        cmd_rpc(args)
+    elif args.cmd == "address":
+        cmd_address(args)
+    elif args.cmd == "crypto":
+        cmd_crypto(args)
     elif args.cmd == "version":
         from qeuph import __version__
         print(f"qeuph {__version__} protocol {C.PROTOCOL_VERSION}")
@@ -286,3 +390,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+

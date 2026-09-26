@@ -268,9 +268,56 @@ class RPCService:
                     "bytes": self.node.mempool.total_size()}
         if method == "getmempool":
             return {"txids": [t.txid().hex() for t in self.node.mempool.all_txs()]}
-        if method == "sendtransaction":
+        if method == "getblocktemplate":
+            from qeuph.core import pow as pow_mod
+            from qeuph import constants as C
+            from qeuph.crypto import address as addr_mod
+            tip = chain.tip
+            payout = params.get("address", "")
+            ahash = addr_mod.address_to_hash(payout, hrp) if payout else (self.miner._payout if self.miner else bytes(64))
+            txs = self.node.mempool.best_transactions(C.MAX_BLOCK_SIZE - 200_000)
+            template_block, reward = chain.create_block_template(ahash or bytes(64), txs)
+            return {
+                "version": C.BLOCK_VERSION,
+                "previousblockhash": tip.hash.hex(),
+                "height": template_block.height,
+                "curtime": template_block.header.timestamp,
+                "bits": hex(template_block.header.bits),
+                "bits_int": template_block.header.bits,
+                "target": hex(pow_mod.bits_to_target(template_block.header.bits)),
+                "coinbasevalue": reward,
+                "coinbasevalue_quh": reward / C.QUPHI_PER_QUH,
+                "transactions": [t.to_dict(hrp) for t in txs],
+                "sizelimit": C.MAX_BLOCK_SIZE,
+                "sigoplimit": 20000,
+            }
+        if method == "submitblock":
+            hexdata = params.get("hex") or params.get("block_hex") or ""
+            if not hexdata and isinstance(params, str):
+                hexdata = params
             try:
-                tx = Transaction.deserialize(bytes.fromhex(params["tx_hex"]))
+                raw = bytes.fromhex(hexdata)
+                block = Block.deserialize(raw)
+            except Exception as e:
+                raise _RpcError(-32002, f"invalid block hex: {e}")
+            fut = asyncio.run_coroutine_threadsafe(
+                self.node.submit_block(block, broadcast=True), self._loop)
+            try:
+                ok = fut.result(timeout=60)
+                if not ok:
+                    raise _RpcError(-32010, "block rejected by consensus rules")
+                return {"success": True, "hash": block.hash.hex(), "height": block.height}
+            except Exception as e:
+                raise _RpcError(-32010, f"submission failed: {e}")
+        if method == "getrawmempool":
+            verbose = bool(params.get("verbose", False))
+            if verbose:
+                return {t.txid().hex(): t.to_dict(hrp) for t in self.node.mempool.all_txs()}
+            return [t.txid().hex() for t in self.node.mempool.all_txs()]
+        if method in ("sendtransaction", "sendrawtransaction"):
+            raw_hex = params.get("tx_hex") or params.get("hex") or ""
+            try:
+                tx = Transaction.deserialize(bytes.fromhex(raw_hex))
             except (KeyError, ValueError) as e:
                 raise _RpcError(-32002, f"bad transaction: {e}")
             fut = asyncio.run_coroutine_threadsafe(
@@ -279,6 +326,54 @@ class RPCService:
             if not accepted:
                 raise _RpcError(-32010, f"rejected: {reason}")
             return {"accepted": True, "txid": tx.txid().hex()}
+        if method == "createrawtransaction":
+            from qeuph.core.tx import TxIn, TxOut
+            from qeuph.crypto import address as addr_mod
+            from qeuph import constants as C
+            inputs_arg = params.get("inputs", [])
+            outputs_arg = params.get("outputs", [])
+            inputs = []
+            for inp in inputs_arg:
+                txid = bytes.fromhex(inp["txid"])
+                idx = int(inp["index"])
+                nonce = int(inp.get("nonce", 1))
+                inputs.append(TxIn(txid, idx, nonce))
+            outputs = []
+            if isinstance(outputs_arg, list):
+                for out in outputs_arg:
+                    for addr_str, val in out.items():
+                        ahash = addr_mod.address_to_hash(addr_str, hrp)
+                        val_quphi = round(float(val) * C.QUPHI_PER_QUH) if isinstance(val, (float, int)) else int(val)
+                        outputs.append(TxOut(val_quphi, ahash))
+            elif isinstance(outputs_arg, dict):
+                for addr_str, val in outputs_arg.items():
+                    ahash = addr_mod.address_to_hash(addr_str, hrp)
+                    val_quphi = round(float(val) * C.QUPHI_PER_QUH) if isinstance(val, (float, int)) else int(val)
+                    outputs.append(TxOut(val_quphi, ahash))
+            tx = Transaction(inputs, outputs)
+            return {"hex": tx.serialize().hex(), "txid": tx.txid().hex()}
+        if method == "getaddressinfo":
+            from qeuph.crypto import address as addr_mod
+            from qeuph import constants as C
+            addr = params.get("address", "")
+            ahash = addr_mod.address_to_hash(addr, hrp)
+            if ahash is None:
+                raise _RpcError(-32002, "invalid address")
+            h = chain.height()
+            bal = state.balance(ahash, h)
+            mbal = state.balance(ahash, h, matured_only=True)
+            nonce = state.nonce_of(ahash)
+            utxos = state.utxos_for(ahash, h)
+            return {
+                "address": addr,
+                "addr_hash": ahash.hex(),
+                "balance": bal,
+                "balance_quh": bal / C.QUPHI_PER_QUH,
+                "matured_balance": mbal,
+                "matured_balance_quh": mbal / C.QUPHI_PER_QUH,
+                "nonce": nonce,
+                "utxo_count": len(utxos),
+            }
         if method in ("getbalance", "listutxos", "getnonce"):
             from qeuph.crypto import address as addr_mod
             addr = params.get("address", "")
@@ -321,13 +416,15 @@ class RPCService:
             if self.miner is None:
                 raise _RpcError(-32020, "miner not available")
             addr = params.get("address", "")
+            threads = int(params.get("threads", 1))
             from qeuph.crypto import address as addr_mod
-            ahash = addr_mod.address_to_hash(addr, hrp)
-            if ahash is None:
-                raise _RpcError(-32002, "invalid payout address")
-            self.miner.set_payout(ahash)
-            self.miner.start()
-            return {"mining": True, "address": addr}
+            if addr:
+                ahash = addr_mod.address_to_hash(addr, hrp)
+                if ahash is None:
+                    raise _RpcError(-32002, "invalid payout address")
+                self.miner.set_payout(ahash)
+            self.miner.start(threads=threads)
+            return {"mining": True, "address": self.miner.payout_address_hex, "threads": self.miner.threads}
         if method == "stopminer":
             if self.miner is not None:
                 self.miner.stop()
@@ -335,10 +432,30 @@ class RPCService:
         if method == "getmininginfo":
             if self.miner is None:
                 return {"mining": False}
-            return {"mining": self.miner.is_mining(),
-                    "hashrate": self.miner.hashrate(),
-                    "blocks_mined": self.miner.blocks_mined,
-                    "payout": self.miner.payout_address_hex}
+            from qeuph.core import pow as pow_mod
+            tip = chain.tip
+            target = pow_mod.bits_to_target(tip.header.bits)
+            return {
+                "mining": self.miner.is_mining(),
+                "hashrate": round(self.miner.hashrate(), 2),
+                "blocks_mined": self.miner.blocks_mined,
+                "threads": getattr(self.miner, "threads", 1),
+                "payout": self.miner.payout_address_hex,
+                "network_difficulty": pow_mod.difficulty_from_bits(tip.header.bits),
+                "bits": hex(tip.header.bits),
+                "target": hex(target),
+                "chain": net.name,
+                "blocks": chain.height(),
+            }
+        if method == "help":
+            return {
+                "blockchain": ["getblockchaininfo", "getblockcount", "getbestblockhash", "getdifficulty", "getblockhash", "getblock", "gettxout", "getrewardinfo"],
+                "transactions": ["gettransaction", "getrawtransaction", "sendrawtransaction", "decoderawtransaction", "createrawtransaction"],
+                "mining": ["getblocktemplate", "submitblock", "getmininginfo", "startminer", "stopminer", "generate"],
+                "mempool": ["getmempoolinfo", "getrawmempool", "getmempool"],
+                "wallet_and_address": ["getbalance", "listutxos", "getnonce", "validateaddress", "getaddressinfo"],
+                "network": ["getnetworkinfo", "getpeerinfo", "stop"]
+            }
         if method == "stop":
 
             async def _do_stop():

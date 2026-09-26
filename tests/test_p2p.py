@@ -17,11 +17,22 @@ TMP1 = "/tmp/qeuph-tests-p2p-a"
 TMP2 = "/tmp/qeuph-tests-p2p-b"
 
 
+import socket
+
+def _get_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 async def _run_scenario():
-    net = REGTEST
-    net.data_dir = TMP1
-    net.p2p_port = 39880
-    net.rpc_port = 39881
+    p1 = _get_free_port()
+    r1 = _get_free_port()
+    p2 = _get_free_port()
+    r2 = _get_free_port()
+
+    import dataclasses
+    net = dataclasses.replace(REGTEST, data_dir=TMP1, p2p_port=p1, rpc_port=r1)
 
     chain1 = ChainManager(net)
     mp1 = Mempool(chain1.state, height_fn=chain1.height)
@@ -29,11 +40,10 @@ async def _run_scenario():
     await node1.start()
 
     # second node: separate profile (own listen port + storage), same genesis
-    import dataclasses
-    net2 = dataclasses.replace(net, data_dir=TMP2, p2p_port=39882, rpc_port=39883)
+    net2 = dataclasses.replace(net, data_dir=TMP2, p2p_port=p2, rpc_port=r2)
     chain2 = ChainManager(net2)
     mp2 = Mempool(chain2.state, height_fn=chain2.height)
-    node2 = QNode(net2, chain2, mp2, connect_peers=[("127.0.0.1", 39880)])
+    node2 = QNode(net2, chain2, mp2, connect_peers=[("127.0.0.1", p1)])
     await node2.start()
 
     try:

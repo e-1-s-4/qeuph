@@ -83,7 +83,8 @@ class QNode:
     # ------------------------------------------------------------------
     async def start(self):
         self.server = await asyncio.start_server(
-            self._handle_connection, "0.0.0.0", self.network.p2p_port)
+            self._handle_connection, "0.0.0.0", self.network.p2p_port,
+            reuse_address=True)
         logger.info("p2p listening on %d", self.network.p2p_port)
         for host, port in self.connect_peers:
             asyncio.create_task(self._connect_peer(host, port))
@@ -92,9 +93,14 @@ class QNode:
         self._stop.set()
         if self.server:
             self.server.close()
+            try:
+                await self.server.wait_closed()
+            except Exception:
+                pass
         for p in list(self.peers):
             try:
                 p.writer.close()
+                await p.writer.wait_closed()
             except Exception:
                 pass
 
