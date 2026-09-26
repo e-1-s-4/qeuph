@@ -16,7 +16,7 @@ from __future__ import annotations
 # ---------------------------------------------------------------------------
 NAME = "Qeuph"
 TICKER = "QUH"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 PROTOCOL_VERSION = 1
 
 # ---------------------------------------------------------------------------
@@ -70,6 +70,25 @@ MAX_TX_SIZE = 400_000
 MIN_RELAY_FEE_RATE = 1000                # quphi per 1000 bytes
 MAX_MEMPOOL_SIZE = 200 * 1024 * 1024     # bytes of serialized txs
 MAX_ORPHAN_BLOCKS = 128
+MTP_WINDOW = 11                           # median-time-past window (blocks)
+MEMPOOL_EVICT_AGE = 3 * 24 * 3600        # drop txs older than 3 days
+
+# ---------------------------------------------------------------------------
+# Peer-to-peer housekeeping
+# ---------------------------------------------------------------------------
+PEER_PING_INTERVAL = 30                  # seconds between keepalive pings
+PEER_IDLE_TIMEOUT = 180                  # drop a peer silent for this long
+PEER_MSG_BUDGET = 600                    # max messages per peer per second
+PEER_MSG_BURST = 1500                    # token bucket burst size
+MAX_FRAME_BUFFER = 32 * 1024 * 1024      # per-peer inbound frame buffer bound
+TARGET_OUTBOUND_PEERS = 8                # maintained by the discovery task
+PEER_RECONNECT_INTERVAL = 15             # seconds between reconnect sweeps
+KNOWN_ADDR_LIMIT = 4096                  # bounded peer address cache
+SYNC_TICK_INTERVAL = 2.0                 # seconds between sync driver passes
+STALLED_SYNC_TIMEOUT = 30                # seconds without progress -> re-request
+MAX_INV = 4096                           # per inv/getdata message
+MAX_HEADERS = 512                        # per headers message
+MAX_ADDR_RELAY = 1024                    # per addr message
 
 # Signature sizes (ML-DSA-87) - used for sanity checks
 MLDSA_PK_SIZE = 2592

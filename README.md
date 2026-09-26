@@ -33,16 +33,23 @@ OpenSSL's ML-DSA.
 # run a full node on mainnet
 python -m qeuph.cli.main node --network mainnet
 
+# run additional nodes on one host (port overrides)
+python -m qeuph.cli.main node --network regtest --p2p-port 39190 --rpc-port 39191 \
+    --connect 127.0.0.1:39090
+
 # solo mine to your address
 python -m qeuph.cli.main node --network mainnet --mine quh1...
 
 # create a wallet (encrypted with a passphrase)
 python -m qeuph.cli.main wallet create --network mainnet
 
-# show addresses + balances (node must be running)
-python -m qeuph.cli.main wallet show --rpc http://127.0.0.1:19091/
+# show addresses + balances (node must be running; seed hidden by default)
+python -m qeuph.cli.main wallet show --rpc http://127.0.0.1:19091/ --count 5
 
-# send funds
+# derive the next unused (persisted) receiving address
+python -m qeuph.cli.main wallet newaddress --network mainnet
+
+# send funds (change automatically goes to a fresh address)
 python -m qeuph.cli.main wallet send --to quh1... --amount 1.5 \
     --fee 0.01 --rpc http://127.0.0.1:19091/
 
@@ -139,14 +146,14 @@ qeuph/
 │   ├── crypto/                     fips204.py, ml_dsa.py, bech32m.py, address.py
 │   ├── core/                       tx, block, chain, state, mempool,
 │   │                               validation, difficulty, pow, reward, genesis
-│   ├── db/store.py                 SQLite persistence (WAL)
+│   ├── db/store.py                 SQLite persistence (WAL, incremental deltas)
 │   ├── network/                    p2p protocol + JSON-RPC
 │   ├── node/node.py                asyncio full node service
 │   ├── services/miner.py           solo miner
 │   ├── wallet/                     keys, keystore (AES-256-GCM), wallet
 │   ├── main.py                     daemon wiring
 │   └── cli/main.py                 command line interface
-├── tests/                          79 tests incl. cross-crypto + integration
+├── tests/                          105 tests incl. cross-crypto + integration
 ├── tools/mine_genesis.py           genesis PoW miner
 └── docs/                           PORTING.md, PROTOCOL.md
 ```
@@ -159,8 +166,10 @@ python -m pytest tests/ -q
 
 The suite covers: FIPS 204 conformance and OpenSSL cross-verification,
 bech32m vectors, transaction rules (signatures, txnonce ordering, replay,
-maturity), block/PoW/difficulty, the reward schedule, wallet encryption,
-mempool policy, chain reorg/persistence, and an end-to-end integration
+maturity, lock time), block/PoW/difficulty, the reward schedule, wallet
+encryption, mempool policy (fee ranking, eviction), chain reorg/persistence
+(cumulative-work side chains, undo logs, incremental UTXO deltas), node
+lifecycle (prompt shutdown, peer discovery) and an end-to-end integration
 test that boots the daemon, mines, and settles transfers through the RPC
 surface.
 
@@ -175,6 +184,25 @@ surface.
   (this is the same guidance FIPS 204 gives for deterministic signing).
 * Post-quantum signatures are large (4,627 B each): a 1-in-2-out Qeuph
   transaction is ~7.5 KB.  Block capacity and relay logic account for it.
+* Transaction `lock_time` is enforced (Bitcoin semantics: height-locked
+  when < 500,000,000, MTP-time-locked otherwise).
+* Change outputs default to fresh derived addresses (whitepaper 6.1), and
+  the wallet persists a next-address index so restarts never reuse it.
+
+## Mainnet readiness (v1.1)
+
+* Fork choice: every stored block carries cumulative work; any side chain
+  that out-works the tip activates after full re-validation, at any depth.
+* Orphan blocks (unknown parent) are held in a bounded pool and resolve
+  when their parent arrives.
+* P2P: peer discovery (`getaddr`/`addr`), keepalive pings with idle
+  pruning, sparse block locators, a continuous headers-first sync driver
+  with stall detection, per-peer rate limiting, and non-blocking relay.
+* Mempool: admission-time fee caching (correct fee-per-byte block
+  templates), capacity eviction, and expiry sweeping.
+* Node shutdown is prompt and deterministic (SIGINT/SIGTERM/RPC `stop`).
+* Persistence: incremental UTXO deltas per block; O(1) balance queries via
+  the in-memory address index.
 
 ## License
 

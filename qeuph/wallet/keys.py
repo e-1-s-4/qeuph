@@ -8,12 +8,14 @@ A Qeuph wallet stores one 32-byte master seed.  Address i is derived by
     address_i = bech32m("quh", double-SHA3-512(pk_i))
 
 mirroring QRL's wallet (one XMSS tree per address) with ML-DSA seeds
-instead of Merkle trees.
+instead of Merkle trees.  The public key (and address) derive on the fast
+backend when available; the expanded sk blob is materialised lazily since
+signing goes through the seed path.
 """
 from __future__ import annotations
 
 import hashlib
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from qeuph.crypto import address as addr_mod
 from qeuph.crypto import ml_dsa
@@ -28,16 +30,29 @@ def derive_seed(master_seed: bytes, index: int) -> bytes:
 class WalletKey:
     """Material for one derived address."""
 
-    __slots__ = ("index", "seed", "pk", "sk", "hrp")
+    __slots__ = ("index", "seed", "hrp", "_pk", "_sk")
 
-    def __init__(self, index: int, seed: bytes, pk: bytes, sk: bytes,
-                 hrp: str = "quh"):
+    def __init__(self, index: int, seed: bytes, hrp: str = "quh"):
         self.index = index
         self.seed = seed
-        self.pk = pk
-        self.sk = sk
         self.hrp = hrp
+        self._pk: Optional[bytes] = None
+        self._sk: Optional[bytes] = None
 
+    # ------------------------------------------------------------------
+    @property
+    def pk(self) -> bytes:
+        if self._pk is None:
+            self._pk = ml_dsa.pk_from_seed(self.seed)
+        return self._pk
+
+    @property
+    def sk(self) -> bytes:
+        if self._sk is None:
+            self._sk = ml_dsa.keypair_from_seed(self.seed)[1]
+        return self._sk
+
+    # ------------------------------------------------------------------
     @property
     def addr_hash(self) -> bytes:
         return addr_mod.pk_to_hash(self.pk)
@@ -49,8 +64,7 @@ class WalletKey:
 
 def derive_key(master_seed: bytes, index: int, hrp: str = "quh") -> WalletKey:
     seed = derive_seed(master_seed, index)
-    pk, sk = ml_dsa.keypair_from_seed(seed)
-    return WalletKey(index, seed, pk, sk, hrp)
+    return WalletKey(index, seed, hrp)
 
 
 class KeyStore:

@@ -29,7 +29,7 @@ HEADER_SIZE = 4 + 64 + 64 + 8 + 4 + 8 + 16
 
 class BlockHeader:
     __slots__ = ("version", "prev_hash", "merkle_root", "timestamp",
-                 "bits", "height", "nonce")
+                 "bits", "height", "nonce", "_hash_cache")
 
     def __init__(self, version: int, prev_hash: bytes, merkle_root: bytes,
                  timestamp: int, bits: int, height: int, nonce: int = 0):
@@ -40,6 +40,7 @@ class BlockHeader:
         self.bits = bits
         self.height = height
         self.nonce = nonce
+        self._hash_cache: Optional[bytes] = None
 
     def serialize(self) -> bytes:
         return b"".join([
@@ -53,7 +54,9 @@ class BlockHeader:
         ])
 
     def hash(self) -> bytes:
-        return pow_mod.header_hash(self.serialize())
+        if self._hash_cache is None:
+            self._hash_cache = pow_mod.header_hash(self.serialize())
+        return self._hash_cache
 
     @classmethod
     def deserialize(cls, raw: bytes) -> "BlockHeader":
@@ -156,6 +159,7 @@ class Block:
         base = self.header.serialize()
         self.header.nonce = pow_mod.mine_header(base, self.header.bits,
                                                 max_attempts=max_attempts)
+        self.header._hash_cache = None
         return self
 
     # ------------------------------------------------------------------

@@ -9,9 +9,15 @@ Both backends are FIPS 204 conformant and cross-verified: seeded keygen
 produces identical public keys, and each backend verifies the other's
 signatures.  Signatures and keys are byte-identical in format, so the
 blockchain state is fully backend-independent.
+
+Note on signing: the `cryptography` raw private-key form for ML-DSA is the
+32-byte SEED (not the FIPS 204 expanded sk), so seed-based signing takes
+the fast path while signing from a 4896-byte sk blob uses the reference
+implementation.  Wallets hold seeds, so the common path is fast.
 """
 from __future__ import annotations
 
+import functools
 import os
 from typing import Optional, Tuple
 
@@ -23,8 +29,7 @@ _HAS_FAST = False
 try:
     from cryptography.hazmat.primitives.asymmetric import mldsa as _mldsa
     from cryptography.hazmat.primitives.serialization import (
-        Encoding as _Enc, PrivateFormat as _PrivFmt, PublicFormat as _PubFmt,
-        NoEncryption as _NoEnc)
+        Encoding as _Enc, PublicFormat as _PubFmt)
     # probe
     _mldsa.MLDSA87PrivateKey.generate()
     _HAS_FAST = True
@@ -49,11 +54,36 @@ def generate_seed() -> bytes:
     return os.urandom(SEED_SIZE)
 
 
-import functools
+def _fast_pk_from_seed(seed: bytes) -> Optional[bytes]:
+    """pk via OpenSSL, or None when the fast backend is unavailable.
+    FIPS 204 seeded keygen is byte-identical across backends."""
+    if not _HAS_FAST:
+        return None
+    try:
+        key = _mldsa.MLDSA87PrivateKey.from_seed_bytes(seed)
+        return key.public_key().public_bytes(_Enc.Raw, _PubFmt.Raw)
+    except Exception:
+        return None
+
+
+@functools.lru_cache(maxsize=4096)
+def pk_from_seed(seed: bytes) -> bytes:
+    """Deterministic public key from a 32-byte seed (fast path when available)."""
+    if len(seed) != SEED_SIZE:
+        raise ValueError("seed must be 32 bytes")
+    fast = _fast_pk_from_seed(seed)
+    if fast is not None:
+        return fast
+    return fips204.keygen_internal(seed)[0]
+
 
 @functools.lru_cache(maxsize=1024)
 def keypair_from_seed(seed: bytes) -> Tuple[bytes, bytes]:
-    """Deterministic (pk, sk) from a 32-byte seed (FIPS 204 seeded keygen)."""
+    """Deterministic (pk, sk) from a 32-byte seed (FIPS 204 seeded keygen).
+
+    The expanded 4896-byte sk only exists in the reference implementation
+    (OpenSSL's raw private form is the seed), so this call always runs the
+    pure path; use pk_from_seed / sign_with_seed for the fast paths."""
     if len(seed) != SEED_SIZE:
         raise ValueError("seed must be 32 bytes")
     return fips204.keygen_internal(seed)
@@ -67,26 +97,26 @@ def generate_keypair() -> Tuple[bytes, bytes, bytes]:
 
 
 def pk_from_sk_seed(seed: bytes) -> bytes:
-    return keypair_from_seed(seed)[0]
+    return pk_from_seed(seed)
 
 
 # ---------------------------------------------------------------------------
 # Signing / verification
 # ---------------------------------------------------------------------------
 def sign(sk: bytes, message: bytes, ctx: bytes = b"") -> bytes:
-    """Hedged ML-DSA.Sign (FIPS 204 Algorithm 2, default variant)."""
+    """Hedged ML-DSA.Sign (FIPS 204 Algorithm 2, default variant).
+
+    Takes the expanded 4896-byte sk blob (reference-implementation path;
+    see the module docstring for why the seed form is the fast path)."""
     if len(sk) != SK_SIZE:
         raise ValueError("bad private key length")
-    if _HAS_FAST:
-        # OpenSSL path needs the seed; recover it via deterministic re-derivation
-        # is impossible from sk alone, so use the pure backend for sk blobs.
-        # (The fast path is used for seed-based signing below.)
-        return fips204.sign(sk, message, ctx, deterministic=False)
     return fips204.sign(sk, message, ctx, deterministic=False)
 
 
 def sign_with_seed(seed: bytes, message: bytes, ctx: bytes = b"") -> bytes:
     """Hedged signing straight from a 32-byte wallet seed (fast path when available)."""
+    if len(seed) != SEED_SIZE:
+        raise ValueError("seed must be 32 bytes")
     if _HAS_FAST:
         key = _mldsa.MLDSA87PrivateKey.from_seed_bytes(seed)
         if ctx:

@@ -37,7 +37,13 @@ def build_parser() -> argparse.ArgumentParser:
     node.add_argument("--connect", action="append", metavar="HOST:PORT",
                       help="peer to connect to (repeatable)")
     node.add_argument("--rpc-host", default=C.DEFAULT_RPC_HOST)
+    node.add_argument("--p2p-port", type=int, default=None,
+                      help="override the P2P listen port")
+    node.add_argument("--rpc-port", type=int, default=None,
+                      help="override the JSON-RPC port")
     node.add_argument("--data-dir", default=None)
+    node.add_argument("--seed", action="append", metavar="HOST",
+                      help="DNS seed to resolve for peers (repeatable)")
 
     # wallet ------------------------------------------------------------
     wallet = sub.add_parser("wallet", help="wallet operations")
@@ -57,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     w_show.add_argument("--count", type=int, default=1)
     w_show.add_argument("--rpc", default=None,
                         help="node RPC url, e.g. http://127.0.0.1:19091/")
+    w_show.add_argument("--show-seed", action="store_true",
+                        help="also print the master seed (dangerous)")
 
     w_send = wsub.add_parser("send", help="create, sign and broadcast a transaction")
     w_send.add_argument("--path", default=None)
@@ -66,6 +74,10 @@ def build_parser() -> argparse.ArgumentParser:
     w_send.add_argument("--amount", required=True, type=float, help="QUH to send")
     w_send.add_argument("--fee", type=float, default=0.01, help="fee in QUH")
     w_send.add_argument("--from-index", type=int, default=0)
+    w_send.add_argument("--no-fresh-change", action="store_true",
+                        help="return change to the paying address instead of a fresh one")
+    w_send.add_argument("--locktime", type=int, default=0,
+                        help="lock the transaction until height or unix time (0 = off)")
     w_send.add_argument("--rpc", required=True)
 
     w_utxos = wsub.add_parser("utxos", help="list confirmed UTXOs of an address")
@@ -80,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
     w_addr.add_argument("--passphrase", default=None)
     w_addr.add_argument("--network", default="mainnet")
     w_addr.add_argument("--index", type=int, default=0)
+
+    w_new = wsub.add_parser("newaddress", help="derive and persist the next unused address")
+    w_new.add_argument("--path", default=None)
+    w_new.add_argument("--passphrase", default=None)
+    w_new.add_argument("--network", default="mainnet")
 
     w_mnem = wsub.add_parser("mnemonic", help="show 24-word backup phrase")
     w_mnem.add_argument("--path", default=None)
@@ -140,8 +157,12 @@ def cmd_node(args):
     net = get_network(args.network)
     if args.data_dir:
         net.data_dir = args.data_dir
-    run_daemon(args.network, mine_to=args.mine, connect=args.connect,
-               rpc_host=args.rpc_host)
+    if args.p2p_port is not None:
+        net.p2p_port = int(args.p2p_port)
+    if args.rpc_port is not None:
+        net.rpc_port = int(args.rpc_port)
+    run_daemon(net, mine_to=args.mine, connect=args.connect,
+               rpc_host=args.rpc_host, seed_hosts=args.seed)
 
 
 def cmd_wallet(args):
@@ -176,6 +197,9 @@ def cmd_wallet(args):
 
     if args.wcmd == "address":
         print(w.address_at(args.index))
+    elif args.wcmd == "newaddress":
+        addr = w.new_address()
+        print(addr)
     elif args.wcmd == "show":
         print(f"network: {net.name}")
         for i in range(args.count):
@@ -187,7 +211,10 @@ def cmd_wallet(args):
                 except Exception as e:
                     bal = f"  (rpc unavailable: {e})"
             print(f"[{i}] {addr}{bal}")
-        print("master seed (KEEP SECRET):", w.master_seed.hex())
+        if args.show_seed:
+            print("master seed (KEEP SECRET):", w.master_seed.hex())
+        else:
+            print("(use --show-seed to reveal the master seed)")
     elif args.wcmd == "utxos":
         rows = w.fetch_utxos(w.address_at(args.index), args.rpc)
         total = sum(v for _, _, v in rows)
@@ -198,10 +225,15 @@ def cmd_wallet(args):
         amount_quphi = round(args.amount * C.QUPHI_PER_QUH)
         fee_quphi = round(args.fee * C.QUPHI_PER_QUH)
         tx = w.build_transaction(args.from_index, [(args.to, amount_quphi)],
-                                 fee=fee_quphi, rpc_url=args.rpc)
+                                 fee=fee_quphi, rpc_url=args.rpc,
+                                 fresh_change=not args.no_fresh_change,
+                                 lock_time=args.locktime)
         txid = w.send_transaction(tx, args.rpc)
         print(f"sent {args.amount} QUH -> {args.to}")
         print(f"txid: {txid}")
+        if not args.no_fresh_change:
+            print("change went to a fresh wallet address "
+                  "(see `qeuph wallet show --count N`)")
     elif args.wcmd == "mnemonic":
         phrase = w.to_mnemonic()
         print("24-word recovery phrase (KEEP SECRET):")

@@ -7,6 +7,7 @@ into qeuph/core/genesis.py so every node reconstructs the identical block.
 import multiprocessing as mp
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

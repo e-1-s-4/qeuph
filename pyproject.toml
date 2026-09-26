@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qeuph"
-version = "1.0.0"
+version = "1.1.0"
 description = "Qeuph (QUH): quantum-resistant cryptocurrency with ML-DSA-87, SHA3-512 PoW and two-thirding rewards"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -76,7 +76,8 @@ def cipher_name() -> str:
 
 
 def save_wallet(path: str, master_seed: bytes, passphrase: Optional[str],
-                network: str = "mainnet", address_count_hint: int = 0):
+                network: str = "mainnet", address_count_hint: int = 0,
+                next_index: int = 0):
     if len(master_seed) != 32:
         raise WalletError("master seed must be 32 bytes")
     doc = {
@@ -86,6 +87,7 @@ def save_wallet(path: str, master_seed: bytes, passphrase: Optional[str],
         "network": network,
         "cipher": cipher_name(),
         "address_count_hint": address_count_hint,
+        "next_index": next_index,
     }
     salt = secrets.token_bytes(16)
     doc["kdf"] = {
@@ -136,3 +138,12 @@ def load_wallet(path: str, passphrase: Optional[str]) -> bytes:
     if mac.hex() != fb["mac"]:
         raise WalletError("wrong passphrase (or corrupted wallet)")
     return _xor(ct, hashlib.sha3_512(key + iv).digest())
+
+
+def load_wallet_doc(path: str) -> dict:
+    """Read the wallet JSON document (metadata only, no decryption)."""
+    with open(path) as f:
+        doc = json.load(f)
+    if doc.get("format") != FORMAT:
+        raise WalletError("not a qeuph wallet file")
+    return doc

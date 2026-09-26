@@ -134,7 +134,10 @@ class TestIntegration:
         txinfo = rpc("gettransaction", {"txid": txid})
         assert txinfo["height"] >= 103
 
-        # the recipient can spend onward (nonce 1 for the new address)
+        # the recipient can spend onward (nonce 1 for the new address);
+        # with fresh change addresses the surplus lands on the wallet's
+        # next derived address (whitepaper 6.1), not the paying address
+        change_addr = w.address_at(max(w.next_index, 1))
         tx2 = w.build_transaction(
             0, [(miner_addr, round(5 * C.QUPHI_PER_QUH))],
             fee=round(0.01 * C.QUPHI_PER_QUH), rpc_url=RPC)
@@ -147,7 +150,8 @@ class TestIntegration:
             time.sleep(0.1)
         rpc("stopminer")
         got2 = rpc("getbalance", {"address": recipient})
-        assert got2["balance"] == round(7.49 * C.QUPHI_PER_QUH)
+        got2_change = rpc("getbalance", {"address": change_addr})
+        assert got2["balance"] + got2_change["balance"] == round(7.49 * C.QUPHI_PER_QUH)
 
     def test_block_and_reward_queries(self, daemon):
         b0 = rpc("getblock", {"height": 0})

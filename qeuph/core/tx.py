@@ -87,7 +87,9 @@ class TxOut:
 
 
 class Transaction:
-    __slots__ = ("version", "inputs", "outputs", "lock_time")
+    # cached ids are invalidated by _touch() whenever the tx mutates
+    __slots__ = ("version", "inputs", "outputs", "lock_time",
+                 "_txid_cache", "_sigless_cache")
 
     def __init__(self, inputs: List[TxIn], outputs: List[TxOut],
                  version: int = C.TX_VERSION, lock_time: int = 0):
@@ -95,6 +97,13 @@ class Transaction:
         self.inputs = inputs
         self.outputs = outputs
         self.lock_time = lock_time
+        self._txid_cache: Optional[bytes] = None
+        self._sigless_cache: Optional[bytes] = None
+
+    def _touch(self):
+        """Invalidate caches after a mutation (signing etc.)."""
+        self._txid_cache = None
+        self._sigless_cache = None
 
     # ------------------------------------------------------------------
     @property
@@ -102,6 +111,8 @@ class Transaction:
         return len(self.inputs) == 1 and self.inputs[0].is_coinbase
 
     def sigless_bytes(self) -> bytes:
+        if self._sigless_cache is not None:
+            return self._sigless_cache
         out = bytearray()
         out += struct.pack("<I", self.version)
         out += struct.pack("<I", len(self.inputs))
@@ -111,7 +122,8 @@ class Transaction:
         for o in self.outputs:
             out += o.serialize()
         out += struct.pack("<Q", self.lock_time)
-        return bytes(out)
+        self._sigless_cache = bytes(out)
+        return self._sigless_cache
 
     def serialize(self) -> bytes:
         out = bytearray()
@@ -127,8 +139,15 @@ class Transaction:
 
     def txid(self) -> bytes:
         """Double SHA3-512 of the full serialization (whitepaper 2.1)."""
+        if self._txid_cache is not None:
+            return self._txid_cache
         from qeuph.crypto.address import dhash
-        return dhash(self.serialize())
+        self._txid_cache = dhash(self.serialize())
+        return self._txid_cache
+
+    def cached_txid(self) -> bytes:
+        """txid() for already-built transactions (cache-friendly alias)."""
+        return self.txid()
 
     def signing_message(self, input_index: int) -> bytes:
         from qeuph.crypto.address import dhash
@@ -156,6 +175,7 @@ class Transaction:
                 inp.pubkey = fips204.pk_from_sk(key)
             else:
                 raise ValueError("bad key material length")
+        self._touch()
         for idx, (inp, key) in enumerate(zip(self.inputs, keys)):
             if inp.is_coinbase or key is None:
                 continue
@@ -164,6 +184,7 @@ class Transaction:
                 inp.signature = ml_dsa.sign_with_seed(key, msg)
             else:
                 inp.signature = fips204.sign(key, msg, deterministic=False)
+            self._touch()
         return self
 
     def sign_input(self, input_index: int, seed: bytes) -> None:
@@ -171,6 +192,7 @@ class Transaction:
         inp.pubkey = ml_dsa.pk_from_sk_seed(seed)
         msg = self.signing_message(input_index)
         inp.signature = ml_dsa.sign_with_seed(seed, msg)
+        self._touch()
 
     # ------------------------------------------------------------------
     @property

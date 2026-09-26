@@ -31,6 +31,7 @@ MAX_PAYLOAD = 8 * 1024 * 1024
 COMMANDS = {
     "version", "verack", "getheaders", "headers", "getblocks", "block",
     "inv", "getdata", "tx", "mempool", "ping", "pong",
+    "getaddr", "addr",
 }
 
 
@@ -68,13 +69,22 @@ def decode_frame(blob: bytes, magic: bytes = C.MAGIC_BYTES) -> Tuple[str, dict]:
 
 
 class FrameReader:
-    """Incremental frame reader over a byte stream."""
+    """Incremental frame reader over a byte stream.
 
-    def __init__(self, magic: bytes = C.MAGIC_BYTES):
+    The internal buffer is bounded (MAX_FRAME_BUFFER); feeding more data
+    beyond the bound raises BufferError so the caller can drop the peer
+    instead of letting a malicious stream exhaust memory.
+    """
+
+    def __init__(self, magic: bytes = C.MAGIC_BYTES,
+                 max_buffer: int = C.MAX_FRAME_BUFFER):
         self.magic = magic
         self._buf = bytearray()
+        self._max_buffer = max_buffer
 
     def feed(self, data: bytes):
+        if len(self._buf) + len(data) > self._max_buffer:
+            raise BufferError("frame buffer overflow")
         self._buf.extend(data)
 
     def next_frame(self) -> Optional[Tuple[str, dict]]:
@@ -85,7 +95,8 @@ class FrameReader:
             if bytes(self._buf[:4]) != self.magic:
                 idx = bytes(self._buf).find(self.magic)
                 if idx == -1:
-                    self._buf.clear()
+                    # keep a tail that could contain a partial magic
+                    del self._buf[:-4]
                     return None
                 del self._buf[:idx]
                 continue
@@ -102,4 +113,6 @@ class FrameReader:
             try:
                 return decode_frame(frame, self.magic)
             except ValueError:
+                continue
+            except json.JSONDecodeError:
                 continue

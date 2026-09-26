@@ -149,15 +149,18 @@ class SoloMiner:
         found = None
 
         while attempts < max_attempts and self._running.is_set():
+            tried = 0
+            found = None
             for _ in range(batch_size):
                 blob = prefix + nonce.to_bytes(16, "little")
                 if int.from_bytes(pow_mod.dhash(blob), "big") < target:
                     found = nonce
+                    tried += 1
                     break
                 nonce = (nonce + step) & 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
-                attempts += 1
-
-            self._record_batch(batch_size)
+                tried += 1
+            attempts += tried
+            self._record_batch(tried)
 
             if found is not None:
                 break
@@ -170,11 +173,12 @@ class SoloMiner:
             return
 
         block.header.nonce = found
+        block.header._hash_cache = None
         if loop is not None:
             submit = asyncio.run_coroutine_threadsafe(
                 self.node.submit_block(block, broadcast=True), loop)
             try:
-                ok = submit.result(timeout=60)
+                ok = submit.result(timeout=120)
                 if ok:
                     with self._lock:
                         self.blocks_mined += 1
@@ -182,7 +186,8 @@ class SoloMiner:
                 pass
         else:
             # Sync submit fallback
-            if chain.connect_block(block):
+            result = chain.connect_block(block)
+            if result.connected:
                 with self._lock:
                     self.blocks_mined += 1
                 mempool.on_new_block(block)

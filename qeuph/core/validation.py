@@ -3,6 +3,12 @@ Consensus validation rules for transactions and blocks.
 
 Ported from QRL's validation spread across TransactionPool/ChainManager,
 adapted to Qeuph's UTXO + txnonce model and ML-DSA-87 signatures.
+
+Lock time (whitepaper Table 2): a transaction with a non-zero lock_time is
+not final until either the chain reaches height >= lock_time (when
+lock_time < 500,000,000) or the median time of the last 11 blocks
+(MTP) >= lock_time (otherwise) - Bitcoin's semantics applied to Qeuph's
+canonical format.  Coinbase transactions are always final.
 """
 from __future__ import annotations
 
@@ -22,15 +28,35 @@ class BlockValidationError(Exception):
     pass
 
 
+# Threshold separating block-height lock times from unix-time lock times.
+LOCKTIME_THRESHOLD = 500_000_000
+
+
+def tx_is_final(tx: Transaction, height: int, mtp: int) -> bool:
+    """Bitcoin-style finality for the lock_time field."""
+    if tx.lock_time == 0:
+        return True
+    if tx.lock_time < LOCKTIME_THRESHOLD:
+        return height >= tx.lock_time
+    return mtp >= tx.lock_time
+
+
 # ---------------------------------------------------------------------------
 # Transaction validation
 # ---------------------------------------------------------------------------
 def validate_tx(tx: Transaction, state, height: int,
-                utxo_override=None, fee_rate: int = 0) -> int:
+                utxo_override=None, fee_rate: int = 0,
+                mtp: Optional[int] = None) -> int:
     """Validate a non-coinbase transaction against `state`.
 
     `utxo_override`: optional {outpoint: UTXO} lookup used by the mempool
     to layer pending transactions onto the confirmed state.
+
+    `height`: the height at which inclusion is being tested (block height
+    when validating a block; chain height + 1 when admitting to mempool).
+
+    `mtp`: median time past (used by lock time finality); None disables
+    time-based lock time checks.
 
     Returns the fee (quphi).  Raises TxValidationError on any violation.
     """
@@ -44,6 +70,15 @@ def validate_tx(tx: Transaction, state, height: int,
         raise TxValidationError("no outputs")
     if tx.size() > C.MAX_TX_SIZE:
         raise TxValidationError("transaction too large")
+    if not tx_is_final(tx, height, mtp if mtp is not None else 1 << 62):
+        raise TxValidationError(
+            f"transaction locked until {tx.lock_time} "
+            f"(height {height}, mtp {mtp})")
+    for i, o in enumerate(tx.outputs):
+        if o.value <= 0:
+            raise TxValidationError(f"output {i} has non-positive value")
+        if len(o.addr_hash) != C.ADDRESS_HASH_SIZE:
+            raise TxValidationError(f"output {i} bad address hash size")
 
     def lookup(txid, idx):
         if utxo_override is not None and (txid, idx) in utxo_override:
@@ -113,6 +148,8 @@ def validate_coinbase(tx: Transaction, height: int, expected_reward: int) -> int
     for o in tx.outputs:
         if o.value <= 0:
             raise BlockValidationError("coinbase output non-positive")
+        if len(o.addr_hash) != C.ADDRESS_HASH_SIZE:
+            raise BlockValidationError("coinbase output bad address hash size")
     total = tx.total_out
     if total > expected_reward:
         raise BlockValidationError(
@@ -123,10 +160,24 @@ def validate_coinbase(tx: Transaction, height: int, expected_reward: int) -> int
 # ---------------------------------------------------------------------------
 # Block validation
 # ---------------------------------------------------------------------------
+def _check_pow_safe(header_bytes: bytes, bits: int) -> bool:
+    """check_pow, mapping malformed compact targets to validation failure."""
+    from qeuph.core import pow as pow_mod
+    try:
+        return pow_mod.check_pow(header_bytes, bits)
+    except ValueError:
+        return False
+
+
 def validate_block(block, prev_block, state, block_time: int,
                    retarget_interval: int, max_future: int = C.MAX_FUTURE_BLOCK_SECONDS,
-                   current_time: Optional[int] = None) -> int:
+                   current_time: Optional[int] = None,
+                   mtp: Optional[int] = None) -> int:
     """Full block validation against chain tip `prev_block` and `state`.
+
+    Validates every transaction against a working copy of the state that
+    evolves as transactions apply (no full UTXO-set copy: transactions are
+    applied to `state` under an undo log and rolled back before returning).
 
     Returns the total fees contained in the block."""
     import time as _time
@@ -134,6 +185,7 @@ def validate_block(block, prev_block, state, block_time: int,
     from qeuph.core import difficulty as diff_mod
     from qeuph.core import reward as reward_mod
     from qeuph.core import merkle as merkle_mod
+    from qeuph.core.state import UndoBlock
 
     hdr = block.header
     # 1. header links
@@ -143,8 +195,8 @@ def validate_block(block, prev_block, state, block_time: int,
         raise BlockValidationError("prev_hash mismatch")
     if hdr.version != C.BLOCK_VERSION:
         raise BlockValidationError("unknown block version")
-    # 2. PoW
-    if not pow_mod.check_pow(hdr.serialize(), hdr.bits):
+    # 2. PoW (malformed bits fail validation instead of crashing)
+    if not _check_pow_safe(hdr.serialize(), hdr.bits):
         raise BlockValidationError("proof of work invalid")
     # 3. target rules
     if current_time is None:
@@ -168,17 +220,80 @@ def validate_block(block, prev_block, state, block_time: int,
     for tx in block.transactions[1:]:
         if tx.is_coinbase:
             raise BlockValidationError("coinbase in middle of block")
-    # 7. difficulty retarget
-    # (the caller supplies prev bits; retarget computed from timestamps
-    #  handled by chain which has the window history)
-    # 8. reward + fee accounting
+    # 7. reward + fee accounting, applying each tx as it validates
     height = hdr.height
     reward = reward_mod.block_reward(height)
     fees = 0
-    working = state.copy()
+    undo = UndoBlock()
+    try:
+        for tx in block.transactions[1:]:
+            fee = validate_tx(tx, state, height, mtp=mtp)
+            fees += fee
+            state.apply_transaction(tx, height, undo)
+        validate_coinbase(block.transactions[0], height, reward + fees)
+    finally:
+        # pure validation: always roll back what we applied
+        state.undo_block(undo)
+    return fees
+
+
+def validate_and_apply_block(block, prev_block, state, block_time: int,
+                             retarget_interval: int,
+                             max_future: int = C.MAX_FUTURE_BLOCK_SECONDS,
+                             current_time: Optional[int] = None,
+                             mtp: Optional[int] = None) -> int:
+    """Validate the block AND leave it applied to `state`.
+
+    Equivalent to validate_block followed by state.apply_block, but in a
+    single pass with an undo log (no full state copy).  On any validation
+    failure the state is rolled back exactly.  Returns the fees."""
+    import time as _time
+    from qeuph.core import merkle as merkle_mod
+    from qeuph.core import reward as reward_mod
+    from qeuph.core.state import UndoBlock
+
+    hdr = block.header
+    if hdr.height != prev_block.height + 1:
+        raise BlockValidationError(f"height {hdr.height} != parent+1")
+    if hdr.prev_hash != prev_block.hash:
+        raise BlockValidationError("prev_hash mismatch")
+    if hdr.version != C.BLOCK_VERSION:
+        raise BlockValidationError("unknown block version")
+    if not _check_pow_safe(hdr.serialize(), hdr.bits):
+        raise BlockValidationError("proof of work invalid")
+    if current_time is None:
+        current_time = int(_time.time())
+    if hdr.timestamp > current_time + max_future:
+        raise BlockValidationError("block timestamp too far in future")
+    if hdr.timestamp < prev_block.header.timestamp:
+        raise BlockValidationError("block timestamp not monotonic")
+    root = merkle_mod.merkle_root(block.txids())
+    if root != hdr.merkle_root:
+        raise BlockValidationError("merkle root mismatch")
+    if block.block_size() > C.MAX_BLOCK_SIZE:
+        raise BlockValidationError("block too large")
+    if not block.transactions:
+        raise BlockValidationError("block has no coinbase")
+    if not block.transactions[0].is_coinbase:
+        raise BlockValidationError("first transaction must be coinbase")
     for tx in block.transactions[1:]:
-        fee = validate_tx(tx, working, height)
-        fees += fee
-        working.apply_transaction(tx, height)
-    validate_coinbase(block.transactions[0], height, reward + fees)
+        if tx.is_coinbase:
+            raise BlockValidationError("coinbase in middle of block")
+
+    height = hdr.height
+    reward = reward_mod.block_reward(height)
+    fees = 0
+    undo = UndoBlock()
+    ok = False
+    try:
+        for tx in block.transactions[1:]:
+            fee = validate_tx(tx, state, height, mtp=mtp)
+            fees += fee
+            state.apply_transaction(tx, height, undo)
+        validate_coinbase(block.transactions[0], height, reward + fees)
+        state.apply_transaction(block.transactions[0], height, undo)
+        ok = True
+    finally:
+        if not ok:
+            state.undo_block(undo)
     return fees
