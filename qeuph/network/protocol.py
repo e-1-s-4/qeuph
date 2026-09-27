@@ -3,7 +3,7 @@ Wire protocol: length-prefixed frames with magic, command and checksum.
 
 Frame layout (all little-endian):
 
-    magic    4 bytes   b"QUH!"
+    magic    4 bytes   b"QUH!" (network-specific)
     command  12 bytes  ASCII, NUL padded
     length   4 bytes   payload length
     checksum 4 bytes   first 4 bytes of double-SHA3-512(payload)
@@ -11,7 +11,10 @@ Frame layout (all little-endian):
 
 Payloads are JSON documents (simple, debuggable; binary data hex-encoded).
 Commands: version, verack, getheaders, headers, getblocks, block, inv,
-getdata, tx, mempool, ping, pong.
+getdata, notfound, tx, mempool, ping, pong, getaddr, addr.
+
+Every network has its own magic bytes, so a testnet peer dialing a mainnet
+port is rejected by the frame reader instead of being parsed.
 
 Ported from QRL's socket/protocol.py framing philosophy (QRL used protobuf
 over twisted; Qeuph uses JSON over asyncio to keep the dependency set at
@@ -21,7 +24,7 @@ from __future__ import annotations
 
 import json
 import struct
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 from qeuph import constants as C
 from qeuph.crypto.address import dhash
@@ -30,7 +33,7 @@ MAX_PAYLOAD = 8 * 1024 * 1024
 
 COMMANDS = {
     "version", "verack", "getheaders", "headers", "getblocks", "block",
-    "inv", "getdata", "tx", "mempool", "ping", "pong",
+    "inv", "getdata", "notfound", "tx", "mempool", "ping", "pong",
     "getaddr", "addr",
 }
 
@@ -91,12 +94,13 @@ class FrameReader:
         while True:
             if len(self._buf) < 24:
                 return None
-            # resync on magic
+            # resync on magic; a peer on another network never matches, so
+            # its stream is discarded as soon as the buffer drains
             if bytes(self._buf[:4]) != self.magic:
                 idx = bytes(self._buf).find(self.magic)
                 if idx == -1:
                     # keep a tail that could contain a partial magic
-                    del self._buf[:-4]
+                    del self._buf[:-len(self.magic)]
                     return None
                 del self._buf[:idx]
                 continue
@@ -112,7 +116,5 @@ class FrameReader:
             del self._buf[:total]
             try:
                 return decode_frame(frame, self.magic)
-            except ValueError:
-                continue
-            except json.JSONDecodeError:
+            except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
                 continue

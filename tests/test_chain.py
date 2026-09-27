@@ -1,5 +1,4 @@
 """Chain manager + mempool integration tests on the regtest network."""
-import os
 import shutil
 
 import pytest
@@ -7,7 +6,7 @@ import pytest
 from qeuph.config import REGTEST
 from qeuph.core.chain import ChainManager
 from qeuph.core.mempool import Mempool
-from qeuph.core.tx import Transaction, TxIn, TxOut, make_coinbase
+from qeuph.core.tx import Transaction, TxIn, TxOut
 from qeuph.core.validation import TxValidationError, validate_tx
 
 
@@ -26,9 +25,7 @@ TMP = "/tmp/qeuph-tests-chain"
 @pytest.fixture()
 def net():
     shutil.rmtree(TMP, ignore_errors=True)
-    n = REGTEST
-    n.data_dir = TMP
-    return n
+    return REGTEST.with_(data_dir=TMP)
 
 
 @pytest.fixture()
@@ -118,9 +115,9 @@ class TestChain:
         cb_txid = blocks[0].transactions[0].txid()
         other = addr_mod.pk_to_hash(ml_dsa.generate_keypair()[1])
         # two txs spending the same UTXO (second has nonce 2 -> stale)
-        tx1 = Transaction([TxIn(cb_txid, 0, 1)], [TxOut(1, other)])
+        tx1 = Transaction([TxIn(cb_txid, 0, 1)], [TxOut(1 * 10**8, other)])
         tx1.sign([seed])
-        tx2 = Transaction([TxIn(cb_txid, 0, 2)], [TxOut(1, other)])
+        tx2 = Transaction([TxIn(cb_txid, 0, 2)], [TxOut(1 * 10**8, other)])
         tx2.sign([seed])
         # tx1 valid, tx2 fails nonce ordering
         with pytest.raises(TxValidationError):
@@ -131,7 +128,7 @@ class TestFullFlow:
     def test_mine_spend_relay_flow(self, net, miner_keys):
         seed, pk, ah = miner_keys
         cm = ChainManager(net)
-        mp = Mempool(cm.state, fee_rate=0, height_fn=cm.height)
+        mp = Mempool(cm.state_provider(), fee_rate=0, height_fn=cm.height)
         # mine 101 blocks (coinbase of block 1 matures at 101)
         blocks = mine(cm, ah, n=101)
         assert cm.height() == 101
@@ -179,17 +176,17 @@ class TestMempool:
     def test_nonce_chaining_in_pool(self, net, miner_keys):
         seed, pk, ah = miner_keys
         cm = ChainManager(net)
-        mp = Mempool(cm.state, fee_rate=0, height_fn=cm.height)
+        mp = Mempool(cm.state_provider(), fee_rate=0, height_fn=cm.height)
         blocks = mine(cm, ah, n=101)
         cb_txid = blocks[0].transactions[0].txid()
         other = bytes(64)
         # nonce 2 arrives before nonce 1 -> rejected (ordering)
-        tx2 = Transaction([TxIn(cb_txid, 0, 2)], [TxOut(1, other)])
+        tx2 = Transaction([TxIn(cb_txid, 0, 2)], [TxOut(1 * 10**8, other)])
         tx2.sign([seed])
         with pytest.raises(TxValidationError):
             mp.add_tx(tx2)
         # nonce 1 accepted
-        tx1 = Transaction([TxIn(cb_txid, 0, 1)], [TxOut(1, other)])
+        tx1 = Transaction([TxIn(cb_txid, 0, 1)], [TxOut(1 * 10**8, other)])
         tx1.sign([seed])
         mp.add_tx(tx1)
         # nonce 1 replay rejected

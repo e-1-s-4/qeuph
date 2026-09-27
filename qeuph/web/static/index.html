@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qeuph (QUH) — quantum-resistant node explorer</title>
+<meta name="description" content="Qeuph (QUH): a post-quantum blockchain with ML-DSA-87 (FIPS 204) signatures, double SHA3-512 proof of work, Bech32m addresses, a UTXO + txnonce ledger and two-thirding emission to 31.5M QUH.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="inner">
+    <div class="brand">
+      <h1>Qeuph</h1><span class="ticker">QUH</span>
+      <span class="sub" id="brand-net">—</span>
+    </div>
+    <div class="spacer"></div>
+    <span class="pill" id="pill-backend">crypto …</span>
+    <span class="pill" id="pill-peers">peers …</span>
+    <span class="pill" id="pill-sync">state …</span>
+    <div class="netpick">
+      <label class="lbl" for="netpick" style="margin:0">network</label>
+      <select id="netpick">
+        <option value="regtest">regtest</option>
+        <option value="testnet">testnet</option>
+        <option value="mainnet">mainnet</option>
+      </select>
+    </div>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="tabs" id="tabs">
+    <button data-tab="dashboard" class="active">Dashboard</button>
+    <button data-tab="blocks">Blocks</button>
+    <button data-tab="mempool">Mempool</button>
+    <button data-tab="wallet">Wallet</button>
+    <button data-tab="miner">Miner</button>
+    <button data-tab="emission">Emission</button>
+    <button data-tab="crypto">Crypto</button>
+    <button data-tab="console">CLI &amp; RPC</button>
+    <button data-tab="about">About</button>
+  </nav>
+
+  <!-- ============================ DASHBOARD ============================ -->
+  <section class="tab" id="tab-dashboard">
+    <div class="grid g4" style="margin-bottom:14px">
+      <div class="card stat"><span class="k">height</span><span class="v" id="s-height">—</span><span class="n" id="s-tip">—</span></div>
+      <div class="card stat"><span class="k">difficulty</span><span class="v" id="s-diff">—</span><span class="n" id="s-bits">—</span></div>
+      <div class="card stat"><span class="k">block reward</span><span class="v" id="s-reward">—</span><span class="n" id="s-epoch">—</span></div>
+      <div class="card stat"><span class="k">mempool</span><span class="v" id="s-mempool">—</span><span class="n" id="s-mempool-bytes">—</span></div>
+    </div>
+
+    <div class="grid g2">
+      <div class="card">
+        <h3>chain tip</h3>
+        <dl class="kv">
+          <dt>best hash</dt><dd class="hash" id="s-tiphash">—</dd>
+          <dt>chain work</dt><dd id="s-work">—</dd>
+          <dt>median time</dt><dd id="s-mtp">—</dd>
+          <dt>genesis</dt><dd class="hash" id="s-genesis">—</dd>
+          <dt>rpc url</dt><dd id="s-rpc">—</dd>
+          <dt>peers</dt><dd id="s-peers">—</dd>
+          <dt>utxo set</dt><dd id="s-utxos">—</dd>
+          <dt>reorgs / orphans</dt><dd id="s-reorg">—</dd>
+          <dt>data dir</dt><dd id="s-datadir">—</dd>
+        </dl>
+      </div>
+      <div class="card">
+        <h3>emission progress</h3>
+        <div class="row" style="flex-direction:column;align-items:stretch;gap:10px">
+          <div>
+            <div class="mono-sm dim" id="e-text">loading …</div>
+            <div class="bar" style="margin-top:6px"><i id="e-bar" style="width:0%"></i></div>
+          </div>
+          <dl class="kv">
+            <dt>cap</dt><dd>31,500,000 QUH</dd>
+            <dt>exact emission</dt><dd id="e-exact">—</dd>
+            <dt>epoch</dt><dd id="e-epoch">—</dd>
+            <dt>epochs</dt><dd id="e-count">—</dd>
+            <dt>final reward</dt><dd id="e-final">—</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h3>latest blocks</h3>
+      <div class="scroll"><table><thead><tr>
+        <th>height</th><th>time</th><th class="right">txs</th><th class="right">size</th>
+        <th class="right">subsidy</th><th>miner</th><th>hash</th>
+      </tr></thead><tbody id="dash-blocks"></tbody></table></div>
+    </div>
+  </section>
+
+  <!-- ============================ BLOCKS ============================ -->
+  <section class="tab hidden" id="tab-blocks">
+    <div class="card">
+      <div class="row" style="margin-bottom:12px">
+        <div class="shrink"><button class="btn" id="blocks-refresh">Refresh</button></div>
+        <div style="max-width:110px"><label class="lbl" for="blocks-limit">rows</label>
+          <input id="blocks-limit" type="number" value="15" min="1" max="50"></div>
+        <div class="shrink"><button class="btn" id="blocks-gen">Generate 1 (regtest)</button></div>
+      </div>
+      <div class="scroll"><table><thead><tr>
+        <th>height</th><th>age</th><th class="right">txs</th><th class="right">size</th>
+        <th class="right">subsidy</th><th class="right">confs</th><th>hash</th>
+      </tr></thead><tbody id="blocks-body"></tbody></table></div>
+    </div>
+    <div class="card" id="blocks-detail" style="margin-top:14px">
+      <h3>block detail</h3>
+      <pre class="out" id="blocks-detail-out">select a block</pre>
+    </div>
+  </section>
+
+  <!-- ============================ MEMPOOL ============================ -->
+  <section class="tab hidden" id="tab-mempool">
+    <div class="card">
+      <h3>pending transactions</h3>
+      <div class="row" style="margin-bottom:12px">
+        <div class="shrink"><label class="lbl">count</label><span class="mono-sm" id="mp-count">0</span></div>
+        <div class="shrink"><label class="lbl">bytes</label><span class="mono-sm" id="mp-bytes">0</span></div>
+        <div class="shrink"><button class="btn" id="mp-refresh">Refresh</button></div>
+      </div>
+      <div class="scroll"><table><thead><tr>
+        <th>txid</th><th class="right">in</th><th class="right">out</th>
+        <th class="right">size</th><th>outputs</th>
+      </tr></thead><tbody id="mp-body"></tbody></table></div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>transaction detail</h3>
+      <pre class="out" id="mp-detail">select a transaction</pre>
+    </div>
+  </section>
+
+  <!-- ============================ WALLET ============================ -->
+  <section class="tab hidden" id="tab-wallet">
+    <div class="grid g2">
+      <div class="card">
+        <h3>wallet file</h3>
+        <dl class="kv">
+          <dt>path</dt><dd class="mono-sm" id="w-path">—</dd>
+          <dt>present</dt><dd id="w-exists">—</dd>
+          <dt>network</dt><dd id="w-net">—</dd>
+          <dt>cipher</dt><dd id="w-cipher">—</dd>
+          <dt>kdf</dt><dd id="w-kdf">—</dd>
+          <dt>next index</dt><dd id="w-next">—</dd>
+        </dl>
+        <p class="note" style="margin-top:12px">
+          The node never holds keys. A wallet stays sealed on disk and is
+          unlocked per request with a passphrase; the master seed and the
+          24-word recovery phrase are <b>never</b> returned over HTTP — run
+          <code>qeuph wallet mnemonic</code> in a terminal.
+        </p>
+        <div class="row" style="margin-top:12px">
+          <div class="shrink"><button class="btn primary" id="w-create">Create wallet</button></div>
+          <div><label class="lbl" for="w-pass">passphrase (blank = none)</label>
+            <input id="w-pass" type="password" placeholder="new / existing passphrase" autocomplete="new-password"></div>
+        </div>
+        <pre class="out" id="w-out" style="margin-top:12px;max-height:220px">no command run yet</pre>
+      </div>
+
+      <div class="card">
+        <h3>derived addresses</h3>
+        <div class="row" style="margin-bottom:12px">
+          <div class="shrink"><button class="btn" id="w-refresh">Refresh</button></div>
+          <div style="max-width:110px"><label class="lbl" for="w-count">count</label><input id="w-count" type="number" value="5" min="1" max="20"></div>
+        </div>
+        <div class="scroll"><table><thead><tr>
+          <th>#</th><th>address</th><th class="right">balance</th><th class="right">spendable</th><th class="right">nonce</th>
+        </tr></thead><tbody id="w-addrs"></tbody></table></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h3>send</h3>
+      <div class="row">
+        <div><label class="lbl" for="s-to">to</label><input id="s-to" placeholder="rquh1… / quh1… / tquh1…"></div>
+        <div style="max-width:150px"><label class="lbl" for="s-amt">amount (QUH)</label><input id="s-amt" type="number" step="0.00000001" value="1"></div>
+        <div style="max-width:150px"><label class="lbl" for="s-fee">fee (QUH)</label><input id="s-fee" type="number" step="0.00000001" value="0.01"></div>
+        <div style="max-width:110px"><label class="lbl" for="s-idx">from #</label><input id="s-idx" type="number" value="0" min="0"></div>
+        <div class="shrink"><button class="btn primary" id="s-send">Send</button></div>
+      </div>
+      <pre class="out" id="s-out" style="margin-top:12px;max-height:220px">—</pre>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h3>address explorer</h3>
+      <div class="row">
+        <div><label class="lbl" for="a-addr">address</label><input id="a-addr" placeholder="paste a bech32m address"></div>
+        <div class="shrink"><button class="btn" id="a-go">Look up</button></div>
+      </div>
+      <pre class="out" id="a-out" style="margin-top:12px;max-height:300px">—</pre>
+    </div>
+  </section>
+
+  <!-- ============================ MINER ============================ -->
+  <section class="tab hidden" id="tab-miner">
+    <div class="grid g2">
+      <div class="card">
+        <h3>solo miner</h3>
+        <div class="grid g3" style="margin-bottom:12px">
+          <div class="stat"><span class="k">hashrate</span><span class="v small" id="m-hash">—</span><span class="n">H/s</span></div>
+          <div class="stat"><span class="k">blocks mined</span><span class="v small" id="m-blocks">—</span><span class="n" id="m-rejected">—</span></div>
+          <div class="stat"><span class="k">est. block</span><span class="v small" id="m-eta">—</span><span class="n">seconds</span></div>
+        </div>
+        <div class="row">
+          <div><label class="lbl" for="m-payout">payout address</label><input id="m-payout" placeholder="leave blank to use the wallet address"></div>
+          <div style="max-width:130px"><label class="lbl" for="m-threads">threads</label><input id="m-threads" type="number" value="1" min="1" max="16"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="shrink"><button class="btn primary" id="m-start">Start</button></div>
+          <div class="shrink"><button class="btn danger" id="m-stop">Stop</button></div>
+          <div class="shrink"><button class="btn" id="m-apply">Set threads</button></div>
+        </div>
+        <p class="note warn" style="margin-top:12px" id="m-warn">
+          The reference miner is pure Python: roughly 0.3 MH/s per core,
+          because double SHA3-512 dominates. It is correct and convenient for
+          regtest and for checking a template — real mainnet hashrate needs a
+          native SHA3-512 kernel.
+        </p>
+      </div>
+      <div class="card">
+        <h3>difficulty context</h3>
+        <dl class="kv">
+          <dt>network</dt><dd id="mc-net">—</dd>
+          <dt>difficulty</dt><dd id="mc-diff">—</dd>
+          <dt>bits</dt><dd id="mc-bits">—</dd>
+          <dt>expected hashes</dt><dd id="mc-target">—</dd>
+          <dt>your solo ETA</dt><dd id="mc-eta">—</dd>
+        </dl>
+        <p class="note" style="margin-top:12px">
+          A solo miner only finds a block by luck. On mainnet the expected wait
+          at difficulty&nbsp;1 is about 268&nbsp;million hashes; the network
+          as a whole has that many times its own hashrate.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ EMISSION ============================ -->
+  <section class="tab hidden" id="tab-emission">
+    <div class="card">
+      <h3>two-thirding schedule</h3>
+      <p class="note" style="margin-bottom:12px">
+        <code>reward(h) = floor(50 QUH × (2/3)^floor(h / 210000))</code>, floored
+        to whole quphi every epoch exactly as Bitcoin floors its halvings. The
+        geometric series converges on the 31,500,000 QUH cap; the iterated
+        floor leaves the exact emission 0.1407 QUH below it.
+      </p>
+      <div class="scroll" style="max-height:600px"><table><thead><tr>
+        <th>epoch</th><th class="right">start height</th><th class="right">reward (QUH)</th>
+        <th class="right">cumulative (QUH)</th><th>share of cap</th>
+      </tr></thead><tbody id="em-body"></tbody></table></div>
+    </div>
+  </section>
+
+  <!-- ============================ CRYPTO ============================ -->
+  <section class="tab hidden" id="tab-crypto">
+    <div class="grid g2">
+      <div class="card">
+        <h3>FIPS 204 ML-DSA-87 parameters</h3>
+        <dl class="kv" id="c-params"></dl>
+        <p class="note" style="margin-top:12px">
+          <code>qeuph/crypto/fips204.py</code> is a dependency-free reference
+          implementation of FIPS 204 Algorithms 5–48. Seeded keygen is
+          byte-identical to the OpenSSL / AWS-LC backend and each backend
+          verifies the other's signatures, so every signature on the chain has
+          two independent audit paths.
+        </p>
+      </div>
+      <div class="card">
+        <h3>live signature test</h3>
+        <div class="row">
+          <div><label class="lbl" for="c-msg">message</label><input id="c-msg" value="Qeuph post-quantum verification"></div>
+          <div class="shrink"><button class="btn primary" id="c-run">Sign &amp; verify</button></div>
+        </div>
+        <pre class="out" id="c-out" style="margin-top:12px;max-height:320px">press the button</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ CONSOLE ============================ -->
+  <section class="tab hidden" id="tab-console">
+    <div class="card">
+      <h3>CLI — the same commands as the terminal</h3>
+      <p class="note" style="margin-bottom:12px">
+        These are the <code>qeuph</code> subcommands, executed in-process.
+        The command tree below is read from the live argparse parser, so this
+        console can never offer an option the CLI does not have.
+      </p>
+      <div class="row">
+        <div><label class="lbl" for="cli-args">argv (after <code>qeuph</code>)</label>
+          <input id="cli-args" value="version" placeholder="e.g. chain info --json"></div>
+        <div class="shrink"><button class="btn primary" id="cli-run">Run</button></div>
+      </div>
+      <div class="row" style="margin-top:9px">
+        <div class="shrink" style="flex:0 1 320px"><label class="lbl" for="cli-preset">presets</label>
+          <select id="cli-preset"></select></div>
+        <div><label class="lbl" for="cli-pass">wallet passphrase (only for <code>wallet</code> commands)</label>
+          <input id="cli-pass" type="password" autocomplete="off"></div>
+        <div class="shrink"><button class="btn" id="cli-wallet">Run as wallet</button></div>
+      </div>
+      <pre class="out" id="cli-out" style="margin-top:12px;max-height:340px">ready</pre>
+      <details style="margin-top:12px">
+        <summary class="mono-sm dim" style="cursor:pointer">command tree</summary>
+        <pre class="out" id="cli-tree" style="margin-top:8px;max-height:260px">loading …</pre>
+      </details>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h3>JSON-RPC 2.0</h3>
+      <p class="note" style="margin-bottom:12px">
+        Same dispatch path as the standalone daemon
+        (<code>qeuph node</code> → port 19091 on mainnet). A batch is sent as
+        <code>{"batch": [ … ]}</code>.
+      </p>
+      <div class="row">
+        <div><label class="lbl" for="rpc-method">method</label><input id="rpc-method" value="getblockchaininfo"></div>
+        <div style="flex:2 1 260px"><label class="lbl" for="rpc-params">params (JSON)</label><input id="rpc-params" value="{}"></div>
+        <div class="shrink"><button class="btn primary" id="rpc-run">Call</button></div>
+      </div>
+      <div class="row" style="margin-top:9px">
+        <div class="shrink" style="flex:0 1 320px"><label class="lbl" for="rpc-preset">presets</label>
+          <select id="rpc-preset"></select></div>
+      </div>
+      <pre class="out" id="rpc-out" style="margin-top:12px;max-height:360px">ready</pre>
+    </div>
+  </section>
+
+  <!-- ============================ ABOUT ============================ -->
+  <section class="tab hidden" id="tab-about">
+    <div class="grid g2">
+      <div class="card">
+        <h3>consensus parameters</h3>
+        <dl class="kv" id="ab-params"></dl>
+      </div>
+      <div class="card">
+        <h3>what this is</h3>
+        <p class="dim" style="font-size:13px;margin-top:0">
+          Qeuph (QUH) is a quantum-resistant proof-of-work ledger. Every
+          signature on the chain is an ML-DSA-87 lattice signature (FIPS 204,
+          NIST security category 5) and every identifier — transaction ids,
+          block ids, addresses, the proof-of-work digest — is a double
+          SHA3-512 hash, so no elliptic curve and no SHA-2 commitment appears
+          anywhere in the consensus path.
+        </p>
+        <p class="dim" style="font-size:13px">
+          The ledger is UTXO-based and every input additionally carries a
+          <b>txnonce</b>: the per-address strictly-increasing counter that
+          makes ordering deterministic and replay impossible even when a
+          spent output is reconstructed exactly.
+        </p>
+        <p class="dim" style="font-size:13px">
+          Emission uses two-thirding rather than halving: every 210,000 blocks
+          the reward becomes two-thirds of the previous one, floored to whole
+          quphi, converging on the 31,500,000 QUH cap over roughly 108 years.
+        </p>
+        <dl class="kv" style="margin-top:12px">
+          <dt>node version</dt><dd id="ab-version">—</dd>
+          <dt>signature backend</dt><dd id="ab-backend">—</dd>
+          <dt>web ui</dt><dd>python -m qeuph.web.server &nbsp;/&nbsp; npm run start &nbsp;/&nbsp; qeuph web</dd>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <footer class="bot">
+    Qeuph (QUH) — ML-DSA-87 (FIPS 204) · double SHA3-512 PoW · Bech32m addresses · MIT licence
+  </footer>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

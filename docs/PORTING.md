@@ -62,3 +62,68 @@ core, consensus and data model were replaced per the Qeuph whitepaper.
 It is verified against `cryptography` >= 45 (OpenSSL ML-DSA):
 seeded keygen equality and mutual signature verification, plus the
 zeta-table equality with the standard's appendix.
+
+## Deviations from the original port, and why
+
+The first pass of this codebase carried a few QRL-isms that turned out to be
+liability rather than heritage. The changes below are the ones worth knowing
+about when comparing this tree to `QRL-master`.
+
+| area | first pass | now | reason |
+|---|---|---|---|
+| `ChainState` identity | a reorg swapped the object, but the mempool had cached it | everything reaches state through `chain.state` / `chain.state_provider()`; the mempool detects the identity change and re-validates | a stale UTXO set after a reorg means the node validates against a chain that no longer exists |
+| Store writes | block row, index entry and UTXO delta committed separately | one transaction per block, tip pointer last, `synchronous=FULL` | a crash between commits left the store describing a block the state did not contain |
+| Canonical index | trusted on load | re-verified on load; a damaged index replays to the last provable block | the incremental UTXO tables are only meaningful against an intact index |
+| Network profiles | a mutable dataclass; the web UI mutated a module-level singleton | frozen dataclass, `Network.with_()` for overrides | a global mutated out from under another component |
+| `Network` check in wallet | none | the keystore records the network and a mismatch is refused | a mainnet wallet opened as testnet silently reports zero balances |
+| Headers-first IBD | `BlockHeader.hash` was a method but called as a property | fixed; the two-node sync test now covers the real path | the handler raised on every `headers` message, so initial sync never started |
+| `mature` in RPC/UI | computed from `confirmations`, one off consensus | shared `is_mature()` helper used by validation, RPC, UI and CLI | a wallet could be told an output was spendable when the node would reject the spend |
+| Mempool | rebuilt its overlay per insert | ancestor-depth limit, exact fee caching, reorg resync | unbounded chained pending spends and O(n) rebuilds |
+| Peers | no scoring, no ban table, unbounded block requests | token bucket, persistent 24 h ban table, batched requests, `notfound` | eclipse and memory-exhaustion vectors |
+| Passphrase | prompted unconditionally | `--passphrase`, `$QEUPH_WALLET_PASSPHRASE`, then a prompt only on a TTY | a piped or containerised run hung forever |
+| `exact_total_emission` | carried a dead `if False else` branch | `epoch_rewards()` iterates the floor once and every view derives from it | the old shape hid the rule the total depends on |
+| `last_reward_height` | returned the start of the zero-paying epoch | returns the start of the final *paying* epoch (11,130,000) | matches the whitepaper's wording |
+| BIP-39 wordlist | 2047 words, `"tragic"` missing | complete 2048-word list, verified against the `mnemonic` reference | a wallet could raise `IndexError` on 1 seed in 2048, and every phrase past index 1846 was misaligned |
+| Web UI | returned the master seed and the recovery phrase over HTTP | refused and redacted | an unauthenticated HTTP response is not a place for a seed |
+| RPC | no auth, no batches, HTTP 4xx for application errors | Basic auth, batch arrays, JSON-RPC error objects with HTTP 200 | matches JSON-RPC 2.0 and makes the port safe to expose deliberately |
+| pytest | a root-level `pytest.py` shim shadowed the real runner | removed; `pyproject.toml` holds the config | `python -m pytest` silently ran a hand-rolled runner instead of pytest |
+
+## Testing approach
+
+The suite is written against the *protocol*, not the implementation, so a
+behaviour change that contradicts the whitepaper shows up as a failure in
+`test_whitepaper.py` rather than as a silently different chain. Two-node sync,
+the RPC surface and the web surface are exercised against real listeners and
+real sockets rather than mocks, because every bug found during this pass lived
+in the wiring rather than in the units.
+
+### Handshake traps found while hardening
+
+Three faults in the original handshake only appeared once two real daemons
+talked to each other, and all three are now covered by tests in
+`tests/test_p2p_sync.py`:
+
+1. **Stale advertised height.** A peer's view of our height is a snapshot
+   from its `version` message.  Two nodes that were level at handshake time
+   and then diverged (one mined) never noticed: the sync driver compares the
+   local tip against `peer.best_height`, so a stale value read as "synced"
+   forever.  The fix re-advertises on `verack`, after every connected block,
+   and on a periodic interval — coalesced so a fast sync does not turn into
+   one frame per block, with the suppressed tail flushed once the burst
+   settles (otherwise a dozen blocks mined inside one throttle window left
+   the peer convinced it was level).
+2. **`verack` answered more than once.** Making the height refresh a
+   `version` message meant the peer's `_on_version` replied `verack` again,
+   whose `_on_verack` replied `version` again: a tight ping-pong that the
+   token-bucket rate limiter resolved by disconnecting both peers.  `verack`
+   is now sent exactly once per connection.
+3. **A `--connect` peer that is not listening yet.** The daemon only dialed
+   the configured peers once, in `start()`.  Start the peer a moment later and
+   the node sat idle until the next 15-second discovery sweep.  Configured
+   peers are now retried on a 1s→10s backoff.  Separately, the discovery
+   sweep pre-claimed the in-flight dial slot, which made `_connect_peer` see
+   its own key in that set and skip the dial entirely.
+
+`_connect_peer` establishes a connection and then *serves* it for the
+connection's whole lifetime, so it only returns when the peer disconnects. It
+must always be scheduled as a task, never awaited from the caller's flow.

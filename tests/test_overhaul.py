@@ -146,7 +146,7 @@ class TestReorg:
         assert cm.state.nonce_of(ah) == 0
         assert cm.state.get_utxo(cb_txid, 0) is None
         # spending the old-chain coinbase is impossible (missing UTXO)
-        tx2 = Transaction([TxIn(cb_txid, 0, 1)], [TxOut(1, bh)])
+        tx2 = Transaction([TxIn(cb_txid, 0, 1)], [TxOut(1 * 10**8, bh)])
         tx2.sign([seed])
         with pytest.raises(TxValidationError, match="missing UTXO"):
             validate_tx(tx2, cm.state, cm.height())
@@ -199,7 +199,8 @@ class TestMempoolFees:
         cm = ChainManager(net)
         blocks = mine(cm, ah, n=101)
         cb = blocks[0].transactions[0].txid()
-        mp = Mempool(cm.state, height_fn=cm.height, mtp_fn=cm.median_time_past)
+        mp = Mempool(cm.state_provider(), height_fn=cm.height,
+                    mtp_fn=cm.median_time_past)
         # spend coinbase, change back to the sender (chained spend)
         rich = Transaction([TxIn(cb, 0, 1)], [TxOut(25 * 10**8, ah)])
         rich.sign([seed])
@@ -226,9 +227,9 @@ class TestMempoolFees:
         cm = ChainManager(net)
         blocks = mine(cm, ah, n=101)
         cb = blocks[0].transactions[0].txid()
-        mp = Mempool(cm.state, height_fn=cm.height, mtp_fn=cm.median_time_past)
+        mp = Mempool(cm.state_provider(), height_fn=cm.height,
+                    mtp_fn=cm.median_time_past)
         # shrink the budget to force eviction
-        import qeuph.core.mempool as mp_mod
         old_max = C.MAX_MEMPOOL_SIZE
         C.MAX_MEMPOOL_SIZE = 1
         try:
@@ -260,7 +261,8 @@ class TestLockTime:
         blocks = mine(cm, ah, n=101)
         cb = blocks[0].transactions[0].txid()
         other = addr_mod.pk_to_hash(ml_dsa.generate_keypair()[1])
-        tx = Transaction([TxIn(cb, 0, 1)], [TxOut(1, other)], lock_time=cm.height())
+        tx = Transaction([TxIn(cb, 0, 1)], [TxOut(1 * 10**8, other)],
+                         lock_time=cm.height())
         tx.sign([seed])
         validate_tx(tx, cm.state, cm.height())
 
@@ -269,8 +271,9 @@ class TestLockTime:
         cm = ChainManager(net)
         blocks = mine(cm, ah, n=101)
         cb = blocks[0].transactions[0].txid()
-        mp = Mempool(cm.state, height_fn=cm.height, mtp_fn=cm.median_time_past)
-        tx = Transaction([TxIn(cb, 0, 1)], [TxOut(1, bytes(64))],
+        mp = Mempool(cm.state_provider(), height_fn=cm.height,
+                    mtp_fn=cm.median_time_past)
+        tx = Transaction([TxIn(cb, 0, 1)], [TxOut(1 * 10**8, bytes(64))],
                          lock_time=cm.height() + 100)
         tx.sign([seed])
         with pytest.raises(TxValidationError, match="locked"):
@@ -282,7 +285,7 @@ class TestLockTime:
         blocks = mine(cm, ah, n=101)
         cb = blocks[0].transactions[0].txid()
         mtp = cm.median_time_past()
-        tx = Transaction([TxIn(cb, 0, 1)], [TxOut(1, bytes(64))],
+        tx = Transaction([TxIn(cb, 0, 1)], [TxOut(1 * 10**8, bytes(64))],
                          lock_time=mtp + 10_000)
         tx.sign([seed])
         with pytest.raises(TxValidationError, match="locked"):
@@ -386,7 +389,8 @@ class TestProtocol:
 class TestNodeShutdown:
     def test_stop_completes_with_connected_silent_peer(self, net):
         cm = ChainManager(net)
-        mp = Mempool(cm.state, height_fn=cm.height, mtp_fn=cm.median_time_past)
+        mp = Mempool(cm.state_provider(), height_fn=cm.height,
+                    mtp_fn=cm.median_time_past)
 
         def free_port():
             with socket.socket() as s:
@@ -417,8 +421,8 @@ class TestNodeShutdown:
     def test_addr_exchange_between_peers(self, net):
         cm1 = ChainManager(net)
         cm2 = ChainManager(dataclasses.replace(net, data_dir=net.data_dir + "-b"))
-        mp1 = Mempool(cm1.state, height_fn=cm1.height)
-        mp2 = Mempool(cm2.state, height_fn=cm2.height)
+        mp1 = Mempool(cm1.state_provider(), height_fn=cm1.height)
+        mp2 = Mempool(cm2.state_provider(), height_fn=cm2.height)
 
         def free_port():
             with socket.socket() as s:
@@ -476,14 +480,15 @@ class TestWalletPrivacy:
                 raise AssertionError(method)
 
         import qeuph.wallet.wallet as wmod
-        orig = wmod._rpc
-        wmod._rpc = lambda url, method, params: FakeRPC().call(method, params)
+        orig = wmod.rpc_call
+        wmod.rpc_call = lambda url, method, params=None, timeout=60: \
+            FakeRPC().call(method, params)
         try:
             tx = w.build_transaction(0, [(w.address_at(5), 10 * 10**8)],
                                      fee=10**6, rpc_url="http://fake",
                                      fresh_change=True)
         finally:
-            wmod._rpc = orig
+            wmod.rpc_call = orig
         # change output is NOT the sender address
         out_addrs = {o.addr_hash for o in tx.outputs}
         assert addr_mod.address_to_hash(w.address_at(0), net.hrp) not in out_addrs

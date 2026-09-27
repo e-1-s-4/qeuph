@@ -17,11 +17,10 @@ from typing import Optional
 from qeuph import constants as C
 from qeuph.config import Network
 from qeuph.core import pow as pow_mod
-from qeuph.core import reward as reward_mod
 from qeuph.core.block import Block, BlockHeader
 from qeuph.core.merkle import merkle_root
 from qeuph.core.tx import Transaction, TxIn, TxOut
-from qeuph.crypto.address import dhash, pk_to_hash
+from qeuph.crypto.address import dhash
 
 # The one-and-only null recipient: double SHA3-512 of the empty byte string.
 NULL_ADDR_HASH = dhash(b"")

@@ -17,7 +17,7 @@ never needs to copy the whole state.
 """
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 OutPoint = Tuple[bytes, int]          # (txid 64B, index)
 
@@ -35,6 +35,28 @@ class UTXO:
     def __repr__(self):  # pragma: no cover
         return (f"UTXO({self.addr_hash.hex()[:12]}.., {self.value}, "
                 f"cb={self.is_coinbase}, h={self.cb_height})")
+
+
+def is_mature(u: "UTXO", height: int) -> bool:
+    """Consensus maturity test for a UTXO at `height`.
+
+    This is the SAME expression `validate_tx` uses, so every surface (RPC,
+    web, CLI) agrees with what a block would accept.  Note it is one stricter
+    than the display-oriented `confirmations = height - cb_height + 1`: a
+    coinbase mined at height 1 becomes spendable in block 101, which shows as
+    101 confirmations but needs `101 - 1 >= 100`.
+    """
+    if not u.is_coinbase:
+        return True
+    from qeuph import constants as C
+    return (height - u.cb_height) >= C.COINBASE_MATURITY
+
+
+def confirmations(u: "UTXO", height: int) -> int:
+    """Display confirmations: blocks since the funding block, inclusive."""
+    if u.is_coinbase:
+        return max(0, height - u.cb_height + 1)
+    return height + 1
 
 
 class UndoBlock:
@@ -103,10 +125,16 @@ class ChainState:
     # ------------------------------------------------------------------
     def apply_transaction(self, tx, height: int,
                           undo: Optional[UndoBlock] = None) -> None:
-        """Apply a validated transaction (mutates state, records undo)."""
+        """Apply a validated transaction (mutates state, records undo).
+
+        Zero-value outputs create no UTXO: they can never be spent (an input
+        worth 0 cannot fund a positive output) and the genesis coinbase pays
+        0 by design, so indexing them would only add dead entries."""
         txid = tx.cached_txid()
         if tx.is_coinbase:
             for i, out in enumerate(tx.outputs):
+                if out.value <= 0:
+                    continue
                 op = (txid, i)
                 u = UTXO(out.addr_hash, out.value, True, height)
                 self.utxos[op] = u
@@ -132,6 +160,8 @@ class ChainState:
                 undo.nonces.append((ah, prev if prev is not None else 0))
         # create outputs
         for i, out in enumerate(tx.outputs):
+            if out.value <= 0:
+                continue
             op = (txid, i)
             u = UTXO(out.addr_hash, out.value, False, height)
             self.utxos[op] = u
@@ -167,30 +197,26 @@ class ChainState:
     def balance(self, addr_hash: bytes, height: Optional[int] = None,
                 matured_only: bool = False) -> int:
         """Total value locked to addr_hash.  With matured_only=True coinbase
-        outputs younger than COINBASE_MATURITY blocks (relative to `height`)
-        are excluded."""
-        from qeuph import constants as C
+        outputs that consensus still considers immature at `height` are
+        excluded (see `is_mature`)."""
         total = 0
         for op in self._by_addr.get(addr_hash, ()):
             u = self.utxos.get(op)
             if u is None:
                 continue
-            if matured_only and u.is_coinbase and height is not None and \
-                    (height - u.cb_height) < C.COINBASE_MATURITY:
+            if matured_only and height is not None and not is_mature(u, height):
                 continue
             total += u.value
         return total
 
     def utxos_for(self, addr_hash: bytes, height: Optional[int] = None,
                   matured_only: bool = False) -> list:
-        from qeuph import constants as C
         out = []
         for op in sorted(self._by_addr.get(addr_hash, ())):
             u = self.utxos.get(op)
             if u is None:
                 continue
-            if matured_only and u.is_coinbase and height is not None and \
-                    (height - u.cb_height) < C.COINBASE_MATURITY:
+            if matured_only and height is not None and not is_mature(u, height):
                 continue
             out.append((op[0], op[1], u))
         return out

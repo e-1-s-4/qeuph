@@ -17,7 +17,7 @@ the block height (BIP-34 style) and up to 256 bytes of miner data.
 from __future__ import annotations
 
 import struct
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from qeuph import constants as C
 from qeuph.crypto import address as addr_mod
@@ -26,6 +26,8 @@ from qeuph.crypto import ml_dsa
 ZERO_TXID = bytes(64)
 COINBASE_INDEX = 0xFFFFFFFF
 MAX_COINBASE_DATA = 256
+MAX_U64 = (1 << 64) - 1
+MAX_U32 = (1 << 32) - 1
 
 
 class TxIn:
@@ -43,6 +45,14 @@ class TxIn:
     @property
     def is_coinbase(self) -> bool:
         return self.prev_txid == ZERO_TXID and self.prev_index == COINBASE_INDEX
+
+    def _check(self):
+        if len(self.prev_txid) != 64:
+            raise ValueError("prev_txid must be 64 bytes")
+        if not (0 <= self.prev_index <= MAX_U32):
+            raise ValueError("prev_index out of range")
+        if not (0 <= self.txnonce <= MAX_U64):
+            raise ValueError("txnonce out of range")
 
     def serialize_sigless(self) -> bytes:
         # pubkey IS committed; signature is not (it covers the digest)
@@ -80,6 +90,10 @@ class TxOut:
         self.addr_hash = addr_hash
 
     def serialize(self) -> bytes:
+        if not (0 <= self.value <= MAX_U64):
+            raise ValueError("output value out of range")
+        if len(self.addr_hash) != 64:
+            raise ValueError("output address hash must be 64 bytes")
         return struct.pack("<Q", self.value) + self.addr_hash
 
     def __repr__(self):
@@ -110,6 +124,16 @@ class Transaction:
     def is_coinbase(self) -> bool:
         return len(self.inputs) == 1 and self.inputs[0].is_coinbase
 
+    def _check(self):
+        if not (0 <= self.version <= MAX_U32):
+            raise ValueError("version out of range")
+        if not (0 <= self.lock_time <= MAX_U64):
+            raise ValueError("lock_time out of range")
+        if not self.inputs or not self.outputs:
+            raise ValueError("transaction needs at least one input and output")
+        for i in self.inputs:
+            i._check()
+
     def sigless_bytes(self) -> bytes:
         if self._sigless_cache is not None:
             return self._sigless_cache
@@ -126,6 +150,7 @@ class Transaction:
         return self._sigless_cache
 
     def serialize(self) -> bytes:
+        self._check()
         out = bytearray()
         out += struct.pack("<I", self.version)
         out += struct.pack("<I", len(self.inputs))
@@ -209,7 +234,14 @@ class Transaction:
 
     # ------------------------------------------------------------------
     @classmethod
-    def deserialize(cls, raw: bytes) -> "Transaction":
+    def deserialize(cls, raw: bytes, allow_unsigned: bool = False) -> "Transaction":
+        """Parse the canonical encoding.
+
+        `allow_unsigned` accepts inputs whose pubkey/signature are still zero
+        length, which is what `createrawtransaction` emits and what a
+        wallet needs before signing.  Consensus paths never set it: a block
+        input must carry a full ML-DSA-87 key and signature.
+        """
         pos = 0
 
         def take(n):
@@ -222,8 +254,8 @@ class Transaction:
 
         version = struct.unpack("<I", take(4))[0]
         n_in = struct.unpack("<I", take(4))[0]
-        if n_in > 4096:
-            raise ValueError("too many inputs")
+        if n_in == 0 or n_in > C.MAX_TX_INPUTS:
+            raise ValueError("bad input count")
         inputs = []
         for _ in range(n_in):
             prev_txid = take(64)
@@ -237,18 +269,22 @@ class Transaction:
                     raise ValueError("coinbase data too long")
                 inputs.append(TxIn(prev_txid, prev_index, txnonce, data=blob))
             else:
-                if dlen != ml_dsa.PK_SIZE:
+                if dlen not in (0, ml_dsa.PK_SIZE):
                     raise ValueError("bad pubkey length")
+                if dlen == 0 and not allow_unsigned:
+                    raise ValueError("missing pubkey")
                 pubkey = blob
                 slen = struct.unpack("<H", take(2))[0]
-                sig = take(slen) if slen else b""
-                if slen != ml_dsa.SIG_SIZE:
+                if slen not in (0, ml_dsa.SIG_SIZE):
                     raise ValueError("bad signature length")
+                if slen == 0 and not allow_unsigned:
+                    raise ValueError("missing signature")
+                sig = take(slen) if slen else b""
                 inputs.append(TxIn(prev_txid, prev_index, txnonce,
                                    pubkey=pubkey, signature=sig))
         n_out = struct.unpack("<I", take(4))[0]
-        if n_out > 4096:
-            raise ValueError("too many outputs")
+        if n_out == 0 or n_out > C.MAX_TX_OUTPUTS:
+            raise ValueError("bad output count")
         outputs = []
         for _ in range(n_out):
             value = struct.unpack("<Q", take(8))[0]
@@ -272,6 +308,8 @@ class Transaction:
                 "pubkey": i.pubkey.hex()[:32] + ("..." if len(i.pubkey) > 32 else ""),
                 "signature": i.signature.hex()[:32] + ("..." if len(i.signature) > 32 else ""),
                 "data": i.data.hex() if i.data else "",
+                "data_text": (i.data.decode("utf-8", "replace")
+                              if i.data else ""),
             } for i in self.inputs],
             "outputs": [{
                 "value": o.value,
@@ -285,9 +323,16 @@ class Transaction:
 
 def make_coinbase(height: int, addr_hash: bytes, reward_with_fees: int,
                   data: bytes = b"") -> Transaction:
-    """Build the coinbase transaction paying the miner."""
+    """Build the coinbase transaction paying the miner.
+
+    `data` is up to 256 bytes of miner-chosen extra nonce; it commits the
+    miner and worker to the block so parallel workers never collide on the
+    same template.
+    """
     if len(data) > MAX_COINBASE_DATA:
         raise ValueError("coinbase data too long")
+    if not (0 <= reward_with_fees <= MAX_U64):
+        raise ValueError("coinbase reward out of range")
     inp = TxIn(ZERO_TXID, COINBASE_INDEX, height, data=data)
     outs = [TxOut(reward_with_fees, addr_hash)] if reward_with_fees > 0 else []
     return Transaction([inp], outs)

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from typing import List
 
 # Compact representation of BIP-39 English wordlist (2048 words)
 # Built-in dictionary so no external package is required
@@ -240,32 +239,32 @@ WORDLIST = [
     "toast", "tobacco", "today", "toddler", "toe", "together", "toilet", "token",
     "tomato", "tomorrow", "tone", "tongue", "tonight", "tool", "tooth", "top",
     "topic", "topple", "torch", "tornado", "tortoise", "toss", "total", "tourist",
-    "toward", "tower", "town", "toy", "track", "trade", "traffic", "train",
-    "transfer", "trap", "trash", "travel", "tray", "treat", "tree", "trend",
-    "trial", "tribe", "trick", "trigger", "trim", "trip", "trophy", "trouble",
-    "truck", "true", "truly", "trumpet", "trust", "truth", "try", "tube",
-    "tuition", "tumble", "tuna", "tunnel", "turkey", "turn", "turtle", "twelve",
-    "twenty", "twice", "twin", "twist", "two", "type", "typical", "ugly",
-    "umbrella", "unable", "unaware", "uncle", "uncover", "under", "undo", "unfair",
-    "unfold", "unhappy", "uniform", "unique", "unit", "universe", "unknown", "unlock",
-    "until", "unusual", "unveil", "update", "upgrade", "uphold", "upon", "upper",
-    "upset", "urban", "urge", "usage", "use", "used", "useful", "useless",
-    "usual", "utility", "vacant", "vacuum", "vague", "valid", "valley", "valve",
-    "van", "vanish", "vapor", "various", "vast", "vault", "vehicle", "velvet",
-    "vendor", "venture", "venue", "verb", "verify", "version", "very", "vessel",
-    "veteran", "viable", "vibrant", "vicious", "victory", "video", "view", "village",
-    "vintage", "violin", "virtual", "virus", "visa", "visit", "visual", "vital",
-    "vivid", "vocal", "voice", "void", "volcano", "volume", "vote", "voyage",
-    "wage", "wagon", "wait", "walk", "wall", "walnut", "want", "warfare",
-    "warm", "warrior", "wash", "wasp", "waste", "water", "wave", "way",
-    "wealth", "weapon", "wear", "weasel", "weather", "web", "wedding", "weekend",
-    "weird", "welcome", "west", "wet", "whale", "what", "wheat", "wheel",
-    "when", "where", "whip", "whisper", "wide", "width", "wife", "wild",
-    "will", "win", "window", "wine", "wing", "wink", "winner", "winter",
-    "wire", "wisdom", "wise", "wish", "witness", "wolf", "woman", "wonder",
-    "wood", "wool", "word", "work", "world", "worry", "worth", "wrap",
-    "wreck", "wrestle", "wrist", "write", "wrong", "yard", "year", "yellow",
-    "you", "young", "youth", "zebra", "zero", "zone", "zoo"
+    "toward", "tower", "town", "toy", "track", "trade", "traffic", "tragic",
+    "train", "transfer", "trap", "trash", "travel", "tray", "treat", "tree",
+    "trend", "trial", "tribe", "trick", "trigger", "trim", "trip", "trophy",
+    "trouble", "truck", "true", "truly", "trumpet", "trust", "truth", "try",
+    "tube", "tuition", "tumble", "tuna", "tunnel", "turkey", "turn", "turtle",
+    "twelve", "twenty", "twice", "twin", "twist", "two", "type", "typical",
+    "ugly", "umbrella", "unable", "unaware", "uncle", "uncover", "under", "undo",
+    "unfair", "unfold", "unhappy", "uniform", "unique", "unit", "universe", "unknown",
+    "unlock", "until", "unusual", "unveil", "update", "upgrade", "uphold", "upon",
+    "upper", "upset", "urban", "urge", "usage", "use", "used", "useful",
+    "useless", "usual", "utility", "vacant", "vacuum", "vague", "valid", "valley",
+    "valve", "van", "vanish", "vapor", "various", "vast", "vault", "vehicle",
+    "velvet", "vendor", "venture", "venue", "verb", "verify", "version", "very",
+    "vessel", "veteran", "viable", "vibrant", "vicious", "victory", "video", "view",
+    "village", "vintage", "violin", "virtual", "virus", "visa", "visit", "visual",
+    "vital", "vivid", "vocal", "voice", "void", "volcano", "volume", "vote",
+    "voyage", "wage", "wagon", "wait", "walk", "wall", "walnut", "want",
+    "warfare", "warm", "warrior", "wash", "wasp", "waste", "water", "wave",
+    "way", "wealth", "weapon", "wear", "weasel", "weather", "web", "wedding",
+    "weekend", "weird", "welcome", "west", "wet", "whale", "what", "wheat",
+    "wheel", "when", "where", "whip", "whisper", "wide", "width", "wife",
+    "wild", "will", "win", "window", "wine", "wing", "wink", "winner",
+    "winter", "wire", "wisdom", "wise", "wish", "witness", "wolf", "woman",
+    "wonder", "wood", "wool", "word", "work", "world", "worry", "worth",
+    "wrap", "wreck", "wrestle", "wrist", "write", "wrong", "yard", "year",
+    "yellow", "you", "young", "youth", "zebra", "zero", "zone", "zoo",
 ]
 
 _WORD_TO_INDEX = {word: i for i, word in enumerate(WORDLIST)}

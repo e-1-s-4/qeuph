@@ -1,9 +1,6 @@
 """Two-node P2P test: block + tx relay over a real TCP connection."""
 import asyncio
 import shutil
-import time
-
-import pytest
 
 from qeuph.config import REGTEST
 from qeuph.core.chain import ChainManager
@@ -35,14 +32,14 @@ async def _run_scenario():
     net = dataclasses.replace(REGTEST, data_dir=TMP1, p2p_port=p1, rpc_port=r1)
 
     chain1 = ChainManager(net)
-    mp1 = Mempool(chain1.state, height_fn=chain1.height)
+    mp1 = Mempool(chain1.state_provider(), height_fn=chain1.height)
     node1 = QNode(net, chain1, mp1)
     await node1.start()
 
     # second node: separate profile (own listen port + storage), same genesis
     net2 = dataclasses.replace(net, data_dir=TMP2, p2p_port=p2, rpc_port=r2)
     chain2 = ChainManager(net2)
-    mp2 = Mempool(chain2.state, height_fn=chain2.height)
+    mp2 = Mempool(chain2.state_provider(), height_fn=chain2.height)
     node2 = QNode(net2, chain2, mp2, connect_peers=[("127.0.0.1", p1)])
     await node2.start()
 

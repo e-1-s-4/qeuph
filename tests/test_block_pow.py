@@ -1,6 +1,5 @@
 """Block, PoW, merkle, difficulty and protocol tests."""
 import random
-import struct
 
 import pytest
 
@@ -8,7 +7,6 @@ from qeuph import constants as C
 from qeuph.core import pow as pow_mod
 from qeuph.core import difficulty as diff_mod
 from qeuph.core import merkle as merkle_mod
-from qeuph.core.tx import Transaction, TxIn, TxOut
 from qeuph.crypto import address as addr_mod
 from qeuph.network import protocol as proto
 
@@ -67,7 +65,7 @@ class TestMerkle:
 
 class TestPoW:
     def test_mine_and_check(self):
-        from qeuph.core.block import Block, BlockHeader
+        from qeuph.core.block import BlockHeader
         hdr = BlockHeader(1, bytes(64), bytes(64), 12345, 0x407FFFFF, 7)
         base = hdr.serialize()
         nonce = pow_mod.mine_header(base, 0x407FFFFF)

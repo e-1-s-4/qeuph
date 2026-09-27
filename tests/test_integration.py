@@ -16,9 +16,9 @@ from qeuph import constants as C
 from qeuph.config import REGTEST
 
 TMP = "/tmp/qeuph-tests-integration"
-REGTEST.data_dir = TMP
-REGTEST.p2p_port = 39777        # avoid clashes with anything else
-REGTEST.rpc_port = 39778
+# Network profiles are frozen singletons; derive a test-scoped copy so a test
+# module can never mutate the process-wide mainnet/testnet/regtest config.
+REGTEST = REGTEST.with_(data_dir=TMP, p2p_port=39777, rpc_port=39778)
 RPC = f"http://127.0.0.1:{REGTEST.rpc_port}/"
 
 
@@ -26,11 +26,6 @@ RPC = f"http://127.0.0.1:{REGTEST.rpc_port}/"
 def daemon():
     shutil.rmtree(TMP, ignore_errors=True)
     net = REGTEST
-    # re-apply: other test modules mutate the shared REGTEST object
-    net.data_dir = TMP
-    net.p2p_port = 39777
-    net.rpc_port = 39778
-
     from qeuph.main import Daemon
     d = Daemon(net)
     holder = {}
@@ -165,7 +160,8 @@ class TestIntegration:
     def test_advanced_rpc_methods(self, daemon):
         # 1. help
         h = rpc("help")
-        assert "blockchain" in h and "mining" in h and "getblocktemplate" in h["mining"]
+        assert "chain" in h and "mining" in h and "getblocktemplate" in h["mining"]
+        assert "admin" in h and "network" in h
 
         # 2. getblocktemplate
         tmpl = rpc("getblocktemplate")

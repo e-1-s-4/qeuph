@@ -1,13 +1,40 @@
 {
   "name": "qeuph",
-  "version": "1.0.0",
-  "description": "Mainnet-ready post-quantum cryptocurrency node suite featuring ML-DSA-87 (FIPS 204) lattice signatures, double SHA3-512 proof-of-work, Bech32m addresses, UTXO + txnonce hybrid consensus, two-thirding emission, encrypted wallet, RPC, and node explorer.",
-  "scripts": {
-    "dev": "python3 -m qeuph.web.server",
-    "build": "python3 -m qeuph.web.build",
-    "start": "python3 -m qeuph.web.server",
-    "test": "python3 -m pytest tests/"
+  "version": "2.0.0",
+  "private": true,
+  "description": "Qeuph (QUH): a quantum-resistant cryptocurrency. ML-DSA-87 (FIPS 204) lattice signatures, double SHA3-512 proof of work, Bech32m addresses, a UTXO + txnonce ledger, two-thirding emission to 31.5M QUH, a JSON-RPC node, a CLI and this explorer UI. The whole node suite is Python with no mandatory third-party dependencies; npm only exists to launch `python -m qeuph.web.server`.",
+  "keywords": [
+    "blockchain",
+    "post-quantum",
+    "cryptocurrency",
+    "ml-dsa",
+    "fips204",
+    "sha3-512",
+    "proof-of-work",
+    "bech32m"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
   },
-  "author": "e-1-s-4",
-  "license": "MIT"
+  "scripts": {
+    "start": "python3 -m qeuph.web.server",
+    "pretest": "python3 -m qeuph.web.build",
+    "dev": "python3 -m qeuph.web.server --verbose",
+    "build": "python3 -m qeuph.web.build",
+    "regtest": "python3 -m qeuph.web.server --network regtest",
+    "testnet": "python3 -m qeuph.web.server --network testnet",
+    "mainnet": "python3 -m qeuph.web.server --network mainnet --embedded-node off",
+    "node": "python3 -m qeuph.cli.main node",
+    "node:mainnet": "python3 -m qeuph.cli.main node --network mainnet",
+    "node:testnet": "python3 -m qeuph.cli.main node --network testnet",
+    "node:regtest": "python3 -m qeuph.cli.main node --network regtest",
+    "cli": "python3 -m qeuph.cli.main",
+    "test": "python3 -m pytest tests/ -q",
+    "smoke:web": "python3 tools/web_smoke.py",
+    "smoke:e2e": "python3 tools/e2e_check.py",
+    "genesis": "python3 -m qeuph.cli.main genesis",
+    "emission": "python3 -m qeuph.cli.main emission",
+    "verify": "python3 -m qeuph.cli.main chain verify"
+  }
 }

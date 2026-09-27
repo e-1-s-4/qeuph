@@ -1,8 +1,6 @@
 """Bech32m + address tests."""
 import os
-import random
 
-import pytest
 
 from qeuph.crypto import address as addr_mod
 from qeuph.crypto import bech32m

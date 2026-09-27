@@ -22,7 +22,6 @@ TARGET = pow_mod.bits_to_target(BITS)
 
 def search(args):
     start, count = args
-    import hashlib
     from qeuph.core.tx import Transaction, TxIn, TxOut, ZERO_TXID, COINBASE_INDEX
     from qeuph.core.merkle import merkle_root
     net = MAINNET
@@ -33,15 +32,10 @@ def search(args):
     )
     root = merkle_root([coinbase.txid()])
     hdr = BlockHeader(1, bytes(64), root, net.genesis_timestamp, BITS, 0, 0)
-    prefix = hdr.serialize()[:-16]
-    # lexicographic byte comparison == big-endian numeric comparison
-    target_bytes = TARGET.to_bytes(64, "big")
-    sha3 = hashlib.sha3_512
-    for i in range(count):
-        nonce = start + i
-        blob = prefix + nonce.to_bytes(16, "little")
-        if sha3(sha3(blob).digest()).digest() < target_bytes:
-            return nonce
+    # the shared PoW kernel: same code path the node validates with
+    for nonce, _tried in pow_mod.mine_range_count(hdr.serialize(), BITS,
+                                                 start, count):
+        return nonce
     return None
 
 

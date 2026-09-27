@@ -143,7 +143,6 @@ def _bit_pack(w, a: int, b: int) -> bytes:
 
 def _simple_bit_unpack(v: bytes, b: int):
     c = b.bit_length()
-    total = 256 * c
     acc = int.from_bytes(v, "little")
     w = [0] * 256
     for i in range(256):
@@ -249,7 +248,10 @@ def _use_hint(h: int, r: int) -> int:
 def _sample_in_ball(ctilde: bytes) -> list:
     """Algorithm 29.  ctilde is lambda/4 = 64 bytes."""
     c = [0] * 256
-    stream = _shake256(ctilde, 8 + 128)   # generous; prefix-stable XOF
+    # 8 bytes of sign bits followed by rejection-sampled index bytes; the
+    # SHAKE256 stream is a prefix-stable XOF, so squeezing extra bytes on
+    # demand is equivalent to squeezing more up front
+    stream = _shake256(ctilde, 8 + 128)
     h = [(stream[i >> 3] >> (i & 7)) & 1 for i in range(64)]
     pos = 8
     for i in range(256 - TAU, 256):

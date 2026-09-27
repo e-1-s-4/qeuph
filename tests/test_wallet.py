@@ -6,7 +6,7 @@ import pytest
 
 from qeuph.crypto import ml_dsa
 from qeuph.wallet import keystore
-from qeuph.wallet.keys import derive_key, derive_seed
+from qeuph.wallet.keys import derive_key
 from qeuph.wallet import Wallet
 
 

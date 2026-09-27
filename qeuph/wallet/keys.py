@@ -15,7 +15,7 @@ signing goes through the seed path.
 from __future__ import annotations
 
 import hashlib
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from qeuph.crypto import address as addr_mod
 from qeuph.crypto import ml_dsa

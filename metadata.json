@@ -1,8 +1,42 @@
 {
   "name": "Qeuph (QUH) Quantum-Resistant Cryptocurrency",
-  "description": "Mainnet-ready post-quantum cryptocurrency node suite featuring ML-DSA-87 (FIPS 204) lattice signatures, double SHA3-512 proof-of-work, Bech32m addresses, UTXO + txnonce hybrid consensus, two-thirding emission, encrypted wallet, RPC, and node explorer.",
-  "permissions": [],
+  "description": "A post-quantum proof-of-work blockchain: ML-DSA-87 (FIPS 204) lattice signatures, double SHA3-512 proof of work, Bech32m addresses, a UTXO + txnonce ledger, two-thirding emission capped at 31,500,000 QUH, an encrypted seed wallet, JSON-RPC, a CLI and a node explorer UI. The whole node suite is Python with no mandatory third-party dependencies.",
+  "keywords": [
+    "blockchain",
+    "post-quantum",
+    "cryptocurrency",
+    "ml-dsa",
+    "fips204",
+    "sha3-512",
+    "proof-of-work",
+    "bech32m",
+    "utxo",
+    "two-thirding"
+  ],
+  "license": "MIT",
+  "author": "Qeuph contributors",
+  "entrypoints": {
+    "web": "python3 -m qeuph.web.server",
+    "node": "python3 -m qeuph.cli.main node --network mainnet",
+    "cli": "python3 -m qeuph.cli.main",
+    "build": "python3 -m qeuph.web.build",
+    "tests": "python3 -m pytest tests/"
+  },
+  "runtime": {
+    "python": ">=3.10",
+    "mandatory_dependencies": [],
+    "optional_dependencies": {
+      "fast": "cryptography>=45",
+      "dev": "pytest>=7, cryptography>=45"
+    }
+  },
   "capabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+    "post-quantum-signatures",
+    "proof-of-work-consensus",
+    "utxo-ledger",
+    "json-rpc",
+    "solo-mining",
+    "encrypted-wallet",
+    "node-explorer"
   ]
 }

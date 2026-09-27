@@ -41,10 +41,20 @@ class _StateView:
 
 
 class Mempool:
+    """Pending-transaction pool.
+
+    `state` may be a ChainState or a zero-argument callable returning one.
+    A callable MUST be used when the chain can reorganise, because a reorg
+    REPLACES the ChainState object: caching the object seen at construction
+    time would silently validate against a stale UTXO set and a stale
+    per-address nonce table after the first reorganisation.
+    """
+
     def __init__(self, state, fee_rate: int = C.MIN_RELAY_FEE_RATE,
-                 height_fn=None, mtp_fn=None):
-        self.state = state
+                 height_fn=None, mtp_fn=None, max_ancestors: int = C.MAX_MEMPOOL_ANCESTORS):
+        self._state_source = state
         self.fee_rate = fee_rate
+        self.max_ancestors = max(1, max_ancestors)
         self._height_fn = height_fn or (lambda: 0)
         self._mtp_fn = mtp_fn or (lambda: 0)
         self.lock = threading.RLock()
@@ -58,8 +68,22 @@ class Mempool:
         self._overlay_removed = set()
         # per-address pending nonce picture
         self._addr_pending_nonce: Dict[bytes, int] = {}
+        # outpoint -> pooled txid that created it, and per-tx ancestor depth
+        self._creator: Dict[Tuple[bytes, int], bytes] = {}
+        self._depth: Dict[bytes, int] = {}
+        self._last_state_id = 0
 
     # ------------------------------------------------------------------
+    @property
+    def state(self):
+        """The current ChainState (resolved on every access)."""
+        s = self._state_source
+        return s() if callable(s) else s
+
+    def state_is_stale(self) -> bool:
+        """True when the chain reorganised since the overlay was last built."""
+        return id(self.state) != self._last_state_id
+
     def _lookup(self, txid, idx):
         op = (txid, idx)
         if op in self._overlay_removed:
@@ -96,25 +120,41 @@ class Mempool:
                 if not self._evict_for(size):
                     raise TxValidationError("mempool full")
 
+            # a chain reorg replaces the ChainState object, so the overlay
+            # built on top of the old one is meaningless
+            self._sync_state_identity()
+            # chained-spend limit: stop a peer from pinning an outpoint
+            # behind an unbounded unconfirmed chain
+            depth = 1 + max((self._depth.get(self._creator.get(
+                (inp.prev_txid, inp.prev_index), b""), 0)
+                for inp in tx.inputs), default=0)
+            if depth > self.max_ancestors:
+                raise TxValidationError(
+                    f"in-mempool ancestor chain of {depth} exceeds the limit "
+                    f"of {self.max_ancestors}")
+
             # validate against state + overlay with mempool-aware nonce
             fee = validate_tx(tx, self._view(), height=self._next_height(),
                               fee_rate=self.fee_rate,
                               mtp=self._mtp_fn())
 
             # apply to overlay
+            from qeuph.crypto.address import pk_to_hash
             for inp in tx.inputs:
                 op = (inp.prev_txid, inp.prev_index)
                 self._overlay.pop(op, None)
                 self._overlay_removed.add(op)
-            from qeuph.crypto.address import pk_to_hash
             for inp in tx.inputs:
                 self._addr_pending_nonce[pk_to_hash(inp.pubkey)] = inp.txnonce
             for i, out in enumerate(tx.outputs):
                 self._overlay[(txid, i)] = UTXO(out.addr_hash, out.value, False, 0)
+                self._creator[(txid, i)] = txid
+            self._depth[txid] = depth
             self.txs[txid] = tx
             self._fees[txid] = fee
             self._sizes[txid] = size
             self._added_at[txid] = time.time()
+            self._last_state_id = id(self.state)
             return fee
 
     # ------------------------------------------------------------------
@@ -163,32 +203,85 @@ class Mempool:
         self._overlay = {}
         self._overlay_removed = set()
         self._addr_pending_nonce = {}
+        self._creator = {}
+        self._depth = {}
+        from qeuph.crypto.address import pk_to_hash
         for tx in self.txs.values():
             for inp in tx.inputs:
                 op = (inp.prev_txid, inp.prev_index)
                 self._overlay.pop(op, None)
                 self._overlay_removed.add(op)
-            from qeuph.crypto.address import pk_to_hash
-            for inp in tx.inputs:
                 self._addr_pending_nonce[pk_to_hash(inp.pubkey)] = inp.txnonce
             txid = tx.txid()
             for i, out in enumerate(tx.outputs):
                 self._overlay[(txid, i)] = UTXO(out.addr_hash, out.value, False, 0)
+                self._creator[(txid, i)] = txid
+        # recompute ancestor depths in dependency order
+        for _ in range(len(self.txs) + 1):
+            changed = False
+            for tx in self.txs.values():
+                txid = tx.txid()
+                want = 1 + max((self._depth.get(self._creator.get(
+                    (inp.prev_txid, inp.prev_index), b""), 0)
+                    for inp in tx.inputs), default=0)
+                if self._depth.get(txid) != want:
+                    self._depth[txid] = want
+                    changed = True
+            if not changed:
+                break
+
+    def _sync_state_identity(self):
+        """Rebuild the overlay when the chain's ChainState object changed."""
+        if self.state_is_stale():
+            self._rebuild_overlay()
+            self._last_state_id = id(self.state)
+
+    def resync(self):
+        """Re-validate every pooled transaction against the current state and
+        drop whatever no longer holds.  Called after a reorganisation."""
+        with self.lock:
+            self._rebuild_overlay()
+            self._last_state_id = id(self.state)
+            height = self._next_height()
+            mtp = self._mtp_fn()
+            drop = []
+            for txid, tx in self.txs.items():
+                try:
+                    validate_tx(tx, self._view(), height=height,
+                                fee_rate=self.fee_rate, mtp=mtp)
+                except TxValidationError:
+                    drop.append(txid)
+            for txid in drop:
+                self.txs.pop(txid, None)
+                self._fees.pop(txid, None)
+                self._sizes.pop(txid, None)
+                self._added_at.pop(txid, None)
+            self._rebuild_overlay()
+            return len(drop)
 
     # ------------------------------------------------------------------
-    def on_new_block(self, block):
+    def on_new_block(self, block, reorg: bool = False):
         """Drop transactions included in / invalidated by a newly connected
-        block."""
+        block.  After a reorganisation the whole pool is re-validated because
+        the chain state object itself was replaced."""
         with self.lock:
             included = {tx.txid() for tx in block.transactions}
-            drop = []
+            drop = [t for t in included if t in self.txs]
+            if reorg:
+                for txid in drop:
+                    self.txs.pop(txid, None)
+                    self._fees.pop(txid, None)
+                    self._sizes.pop(txid, None)
+                    self._added_at.pop(txid, None)
+                self._rebuild_overlay()
+                self._last_state_id = id(self.state)
+                self.resync()
+                return
             view = _StateView(lambda t, i: self.state.get_utxo(t, i),
                               lambda a: self.state.nonce_of(a))
             for txid, tx in self.txs.items():
                 if txid in included:
-                    drop.append(txid)
                     continue
-                # still valid against new state?
                 try:
                     validate_tx(tx, view, height=block.height,
                                 fee_rate=self.fee_rate)
@@ -200,6 +293,7 @@ class Mempool:
                 self._sizes.pop(txid, None)
                 self._added_at.pop(txid, None)
             self._rebuild_overlay()
+            self._last_state_id = id(self.state)
 
     def readd_many(self, txs: List[Transaction]):
         """After a reorg, try to re-admit transactions from disconnected
@@ -220,6 +314,7 @@ class Mempool:
         correctly and outpoint conflicts are skipped.
         """
         with self.lock:
+            self._sync_state_identity()
             ranked = sorted(self.txs.values(),
                             key=lambda t: -self.fee_rate_of(t.txid()))
             chosen: List[Transaction] = []

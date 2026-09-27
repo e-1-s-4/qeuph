@@ -1,37 +1,55 @@
 """
 Encrypted wallet file format (JSON keystore).
 
-Layout (version 1):
+Layout (version 2):
 
     {
       "format": "qeuph-wallet",
-      "version": 1,
-      "created": <iso8601>,
+      "version": 2,
+      "created": "<iso8601 UTC>",
       "network": "mainnet",
-      "crypto": {
-        "cipher": "aes-256-gcm" | "xor-sha3-stream",
-        "kdf": "pbkdf2-sha3-512",
-        "kdf_params": {"n": 60000, "salt": hex},
-        "iv": hex, "ciphertext": hex, "tag": hex
-      }
+      "hrp": "quh",
+      "next_index": 0,
+      "kdf": {"name": "pbkdf2-hmac-sha3-512", "iterations": 600000,
+              "salt": "<hex>"},
+      "cipher": "aes-256-gcm" | "sha3-512-keystream-xor",
+      "aes":    {"nonce": "<hex>", "ciphertext": "<hex>"}          # AEAD path
+      "fallback": {"iv": "<hex>", "ciphertext": "<hex>",
+                   "mac": "<hex>"}                                # legacy path
     }
 
-When the `cryptography` package (>= 36) is present the seed is sealed with
-AES-256-GCM; otherwise a documented SHA3-512 keystream XOR fallback is used
-(and clearly flagged).  The KDF is PBKDF2-HMAC-SHA3-512, 60,000 iterations.
+Cipher
+    With the `cryptography` package (>= 36) present the 32-byte master seed
+    is sealed with AES-256-GCM under a PBKDF2-HMAC-SHA3-512 key, with the
+    file-format string bound in as AEAD associated data.  Without it a
+    documented SHA3-512 keystream XOR with an encrypt-then-MAC construction
+    is used, and the file records which one was applied.
+
+KDF
+    PBKDF2-HMAC-SHA3-512.  The default iteration count is 600,000 (version 2);
+    version-1 files carry their own (60,000) count in the file and are read
+    with it, so old wallets keep opening.  Raise it further with
+    `QEUPH_WALLET_KDF_ITERATIONS` for high-value seeds on fast hardware.
+
+Safety
+    Files are written through a temp file + atomic rename and chmod 0600.
+    A wrong passphrase raises WalletError without leaking which stage failed.
 """
 from __future__ import annotations
 
 import datetime
 import hashlib
+import hmac
 import json
 import os
 import secrets
 from typing import Optional
 
-KDF_ITERATIONS = 60_000
+KDF_ITERATIONS = 600_000
+KDF_ITERATIONS_V1 = 60_000
 FORMAT = "qeuph-wallet"
-VERSION = 1
+VERSION = 2
+AAD = b"qeuph-wallet-v2"
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -44,15 +62,28 @@ class WalletError(Exception):
     pass
 
 
+def kdf_iterations() -> int:
+    override = os.environ.get("QEUPH_WALLET_KDF_ITERATIONS")
+    if override:
+        try:
+            n = int(override)
+            if n >= 1000:
+                return n
+        except ValueError:
+            pass
+    return KDF_ITERATIONS
+
+
 # ---------------------------------------------------------------------------
 # KDF
 # ---------------------------------------------------------------------------
-def _kdf(passphrase: str, salt: bytes, iterations: int = KDF_ITERATIONS) -> bytes:
-    return hashlib.pbkdf2_hmac("sha3_512", passphrase.encode(), salt, iterations, dklen=32)
+def _kdf(passphrase: str, salt: bytes, iterations: int) -> bytes:
+    return hashlib.pbkdf2_hmac("sha3_512", passphrase.encode(), salt,
+                               iterations, dklen=32)
 
 
 # ---------------------------------------------------------------------------
-# Stream cipher fallback (documented; use AES path in production)
+# Stream cipher fallback (documented; prefer the AES path)
 # ---------------------------------------------------------------------------
 def _sha3_keystream(key: bytes, length: int) -> bytes:
     out = bytearray()
@@ -72,12 +103,12 @@ def _xor(data: bytes, key: bytes) -> bytes:
 # Save / load
 # ---------------------------------------------------------------------------
 def cipher_name() -> str:
-    return "aes-256-gcm" if _HAS_AES else "xor-sha3-stream"
+    return "aes-256-gcm" if _HAS_AES else "sha3-512-keystream-xor"
 
 
 def save_wallet(path: str, master_seed: bytes, passphrase: Optional[str],
                 network: str = "mainnet", address_count_hint: int = 0,
-                next_index: int = 0):
+                next_index: int = 0, hrp: str = "quh"):
     if len(master_seed) != 32:
         raise WalletError("master seed must be 32 bytes")
     doc = {
@@ -85,65 +116,116 @@ def save_wallet(path: str, master_seed: bytes, passphrase: Optional[str],
         "version": VERSION,
         "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "network": network,
+        "hrp": hrp,
         "cipher": cipher_name(),
         "address_count_hint": address_count_hint,
-        "next_index": next_index,
+        "next_index": int(next_index),
     }
-    salt = secrets.token_bytes(16)
+    iterations = kdf_iterations()
+    salt = secrets.token_bytes(32)
     doc["kdf"] = {
         "name": "pbkdf2-hmac-sha3-512",
-        "iterations": KDF_ITERATIONS,
+        "iterations": iterations,
         "salt": salt.hex(),
     }
-    key = _kdf(passphrase or "", salt)
+    key = _kdf(passphrase or "", salt, iterations)
     if _HAS_AES:
         nonce = secrets.token_bytes(12)
-        ct = AESGCM(key).encrypt(nonce, master_seed, b"qeuph-wallet-v1")
+        ct = AESGCM(key).encrypt(nonce, master_seed, AAD)
         doc["aes"] = {"nonce": nonce.hex(), "ciphertext": ct.hex()}
     else:
-        iv = secrets.token_bytes(16)
+        iv = secrets.token_bytes(32)
         ct = _xor(master_seed, hashlib.sha3_512(key + iv).digest())
         mac = hashlib.sha3_512(key + iv + ct).digest()
-        doc["fallback"] = {"iv": iv.hex(), "ciphertext": ct.hex(), "mac": mac.hex()}
-    tmp = path + ".tmp"
-    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    with open(tmp, "w") as f:
-        json.dump(doc, f, indent=2)
-    os.replace(tmp, path)
-    os.chmod(path, 0o600)
+        doc["fallback"] = {"iv": iv.hex(), "ciphertext": ct.hex(),
+                           "mac": mac.hex()}
+    _write_atomic(path, doc)
+
+
+def _write_atomic(path: str, doc: dict):
+    tmp = f"{path}.tmp.{os.getpid()}"
+    d = os.path.dirname(os.path.abspath(path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(doc, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def load_wallet(path: str, passphrase: Optional[str]) -> bytes:
-    with open(path) as f:
-        doc = json.load(f)
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+    except FileNotFoundError:
+        raise WalletError(f"wallet file not found: {path}")
+    except json.JSONDecodeError as e:
+        raise WalletError(f"wallet file is not valid JSON: {e}")
     if doc.get("format") != FORMAT:
         raise WalletError("not a qeuph wallet file")
-    if doc.get("version") != VERSION:
-        raise WalletError(f"unsupported wallet version {doc.get('version')}")
-    kdf = doc["kdf"]
-    key = _kdf(passphrase or "", bytes.fromhex(kdf["salt"]), kdf["iterations"])
+    version = doc.get("version")
+    if version not in (1, 2):
+        raise WalletError(f"unsupported wallet version {version}")
+    try:
+        kdf = doc["kdf"]
+        key = _kdf(passphrase or "", bytes.fromhex(kdf["salt"]),
+                   int(kdf["iterations"]))
+    except (KeyError, ValueError) as e:
+        raise WalletError(f"wallet file is missing key material: {e}")
     if "aes" in doc:
         if not _HAS_AES:
-            raise WalletError("wallet needs AES-GCM (install 'cryptography')")
+            raise WalletError("this wallet needs AES-GCM; install 'cryptography'")
         a = doc["aes"]
         try:
             return AESGCM(key).decrypt(bytes.fromhex(a["nonce"]),
-                                       bytes.fromhex(a["ciphertext"]), b"qeuph-wallet-v1")
+                                       bytes.fromhex(a["ciphertext"]), AAD)
         except Exception:
             raise WalletError("wrong passphrase (or corrupted wallet)")
-    fb = doc["fallback"]
+    fb = doc.get("fallback")
+    if not fb:
+        raise WalletError("wallet file has no ciphertext")
     iv = bytes.fromhex(fb["iv"])
     ct = bytes.fromhex(fb["ciphertext"])
     mac = hashlib.sha3_512(key + iv + ct).digest()
-    if mac.hex() != fb["mac"]:
+    if not hmac.compare_digest(mac.hex(), fb["mac"]):
         raise WalletError("wrong passphrase (or corrupted wallet)")
-    return _xor(ct, hashlib.sha3_512(key + iv).digest())
+    seed = _xor(ct, hashlib.sha3_512(key + iv).digest())
+    if len(seed) != 32:
+        raise WalletError("wallet file is corrupted")
+    return seed
 
 
 def load_wallet_doc(path: str) -> dict:
     """Read the wallet JSON document (metadata only, no decryption)."""
-    with open(path) as f:
-        doc = json.load(f)
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+    except FileNotFoundError:
+        raise WalletError(f"wallet file not found: {path}")
+    except json.JSONDecodeError as e:
+        raise WalletError(f"wallet file is not valid JSON: {e}")
     if doc.get("format") != FORMAT:
         raise WalletError("not a qeuph wallet file")
     return doc
+
+
+def reencrypt(path: str, old_passphrase: Optional[str],
+              new_passphrase: Optional[str]) -> None:
+    """Change the passphrase of an existing wallet file in place."""
+    seed = load_wallet(path, old_passphrase)
+    doc = load_wallet_doc(path)
+    save_wallet(path, seed, new_passphrase,
+                network=doc.get("network", "mainnet"),
+                address_count_hint=int(doc.get("address_count_hint", 0)),
+                next_index=int(doc.get("next_index", 0)),
+                hrp=doc.get("hrp", "quh"))

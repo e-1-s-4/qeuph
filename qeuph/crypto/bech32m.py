@@ -12,7 +12,7 @@ even against quantum adversaries, and Bech32m's checksum catches up to
 """
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 # BIP-173/350 character set
 CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
@@ -61,24 +61,36 @@ def _create_checksum(hrp: str, data: List[int]) -> List[int]:
     return [(polymod >> 5 * (5 - i)) & 31 for i in range(6)]
 
 
-def bech32m_encode(hrp: str, data: bytes) -> str:
+def bech32m_encode(hrp: str, data: bytes, max_length: int = 1023) -> str:
     """Encode 8-bit data as a bech32m string (5-bit convert, padded)."""
     converted = _convertbits(data, 8, 5, True)
     if converted is None:
         raise ValueError("invalid data for bech32m encoding")
     combined = converted + _create_checksum(hrp, converted)
-    return hrp + "1" + "".join(CHARSET[d] for d in combined)
+    out = hrp + "1" + "".join(CHARSET[d] for d in combined)
+    if len(out) > max_length:
+        raise ValueError("bech32m string exceeds the length limit")
+    return out
 
 
-def bech32m_decode(hrp: str, addr: str) -> Optional[bytes]:
-    """Decode a bech32m string; return payload bytes or None if invalid."""
+def bech32m_decode(hrp: str, addr: str, max_length: int = 1023) -> Optional[bytes]:
+    """Decode a bech32m string; return payload bytes or None if invalid.
+
+    Qeuph deliberately exceeds BIP-350's 90-character limit: the address keeps
+    the whole 512-bit double-SHA3-512 digest as payload (113 characters), so
+    the limit is raised to `max_length` (C.ADDRESS_MAX_LENGTH) rather than
+    truncating the hash.  BIP-350's error-detection guarantee holds for every
+    length up to 1023, so nothing is lost.
+    """
+    if not isinstance(addr, str):
+        return None
     if any(ord(c) < 33 or ord(c) > 126 for c in addr):
         return None
     if addr.lower() != addr and addr.upper() != addr:
         return None
     addr = addr.lower()
     pos = addr.rfind("1")
-    if pos < 1 or pos + 7 > len(addr) or len(addr) > 1023:
+    if pos < 1 or pos + 7 > len(addr) or len(addr) > max_length:
         return None
     if addr[:pos] != hrp:
         return None
@@ -88,7 +100,6 @@ def bech32m_decode(hrp: str, addr: str) -> Optional[bytes]:
         if c not in CHARSET:
             return None
         decoded.append(CHARSET.index(c))
-    checksum = decoded[-6:]
     data = decoded[:-6]
     if _polymod(_hrp_expand(hrp) + decoded) != BECH32M_CONST:
         return None
