@@ -108,6 +108,14 @@ class Mempool:
         """Validate and admit a transaction.  Returns its fee."""
         if tx.is_coinbase:
             raise TxValidationError("coinbase cannot enter mempool")
+        # Resolve the chain-derived values BEFORE taking mempool.lock.
+        # median_time_past() takes chain.lock, and consider_reorg() holds
+        # chain.lock while invoking the reorg callback that takes
+        # mempool.lock.  Calling it under mempool.lock inverts that order and
+        # deadlocks an RPC thread against the event loop.  ChainState's own
+        # accessors take no lock, so the view below is safe to use inside.
+        next_height = self._next_height()
+        mtp = self._mtp_fn()
         with self.lock:
             txid = tx.txid()
             if txid in self.txs:
@@ -134,9 +142,8 @@ class Mempool:
                     f"of {self.max_ancestors}")
 
             # validate against state + overlay with mempool-aware nonce
-            fee = validate_tx(tx, self._view(), height=self._next_height(),
-                              fee_rate=self.fee_rate,
-                              mtp=self._mtp_fn())
+            fee = validate_tx(tx, self._view(), height=next_height,
+                              fee_rate=self.fee_rate, mtp=mtp)
 
             # apply to overlay
             from qeuph.crypto.address import pk_to_hash
@@ -239,11 +246,11 @@ class Mempool:
     def resync(self):
         """Re-validate every pooled transaction against the current state and
         drop whatever no longer holds.  Called after a reorganisation."""
+        height = self._next_height()
+        mtp = self._mtp_fn()
         with self.lock:
             self._rebuild_overlay()
             self._last_state_id = id(self.state)
-            height = self._next_height()
-            mtp = self._mtp_fn()
             drop = []
             for txid, tx in self.txs.items():
                 try:
@@ -313,6 +320,9 @@ class Mempool:
         template, so chained spends (nonce n then n+1) are ordered
         correctly and outpoint conflicts are skipped.
         """
+        # resolved before mempool.lock: see add_tx for the lock-order rule
+        height = self._height_fn()
+        mtp = self._mtp_fn()
         with self.lock:
             self._sync_state_identity()
             ranked = sorted(self.txs.values(),
@@ -321,8 +331,6 @@ class Mempool:
             local_utxos: Dict[Tuple[bytes, int], UTXO] = {}
             local_removed = set()
             local_nonce: Dict[bytes, int] = {}
-            height = self._height_fn()
-            mtp = self._mtp_fn()
 
             def lookup(t, i):
                 op = (t, i)
@@ -368,4 +376,11 @@ class Mempool:
         return self.txs.get(txid)
 
     def all_txs(self) -> List[Transaction]:
-        return list(self.txs.values())
+        """Snapshot of the pool.
+
+        Takes the lock: an unlocked copy of `self.txs.values()` while
+        another thread is inserting raises "dictionary changed size during
+        iteration", which surfaced as a failed RPC call.
+        """
+        with self.lock:
+            return list(self.txs.values())

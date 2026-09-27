@@ -30,9 +30,10 @@
     "node:testnet": "python3 -m qeuph.cli.main node --network testnet",
     "node:regtest": "python3 -m qeuph.cli.main node --network regtest",
     "cli": "python3 -m qeuph.cli.main",
-    "test": "python3 -m pytest tests/ -q",
+    "test": "python3 -m pytest tests/",
     "smoke:web": "python3 tools/web_smoke.py",
     "smoke:e2e": "python3 tools/e2e_check.py",
+    "conformance": "python3 tools/wp_conformance.py",
     "genesis": "python3 -m qeuph.cli.main genesis",
     "emission": "python3 -m qeuph.cli.main emission",
     "verify": "python3 -m qeuph.cli.main chain verify"

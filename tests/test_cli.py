@@ -389,18 +389,34 @@ class TestWebCliMirror:
         assert "--path" not in _subcommand_options(["node"])
 
     def test_web_cli_allowlist(self):
-        from qeuph.web.server import ALLOWED_CLI_CMDS, ALLOWED_WALLET_CMDS
-        assert ALLOWED_CLI_CMDS >= {"mine", "rpc", "chain", "genesis",
-                                    "emission", "address", "crypto",
-                                    "version"}
+        from qeuph.web.server import (ALLOWED_CHAIN_SUBCOMMANDS,
+                                       ALLOWED_CLI_CMDS,
+                                       ALLOWED_WALLET_CMDS,
+                                       ALLOWED_WALLET_SUBCOMMANDS)
+        assert ALLOWED_CLI_CMDS >= {"chain", "genesis", "emission",
+                                    "address", "crypto", "version"}
         assert ALLOWED_WALLET_CMDS == {"wallet"}
         # a browser must never be able to start a daemon or nest a web server
         assert "node" not in ALLOWED_CLI_CMDS
         assert "web" not in ALLOWED_CLI_CMDS
         assert "wallet" not in ALLOWED_CLI_CMDS
+        # `rpc --url` is an arbitrary outbound URL (SSRF from an HTTP
+        # endpoint) and `mine` is an unbounded CPU/thread burner
+        assert "rpc" not in ALLOWED_CLI_CMDS
+        assert "mine" not in ALLOWED_CLI_CMDS
+        # `chain truncate` / `chain reindex` rewrite or destroy the embedded
+        # node's database, so only the read-only verbs are reachable
+        assert "truncate" not in ALLOWED_CHAIN_SUBCOMMANDS
+        assert "reindex" not in ALLOWED_CHAIN_SUBCOMMANDS
+        assert ALLOWED_CHAIN_SUBCOMMANDS >= {"info", "blocks", "block",
+                                             "tx", "verify"}
+        # key-material and arbitrary-path subcommands stay off HTTP
+        for verb in ("sign", "passwd", "backup", "restore", "mnemonic"):
+            assert verb not in ALLOWED_WALLET_SUBCOMMANDS
 
     def test_secret_redaction(self):
-        from qeuph.web.server import _exports_secret, redact_secrets
+        from qeuph.web.server import (_exports_secret, redact_argv,
+                                       redact_secrets)
         phrase = " ".join(["abandon"] * 23 + ["art"])
         text = f"your phrase is {phrase} ok"
         out = redact_secrets(text)
@@ -411,3 +427,28 @@ class TestWebCliMirror:
         assert _exports_secret(["wallet", "backup", "--out-mnemonic"])
         assert _exports_secret(["wallet", "show", "--show-seed"])
         assert not _exports_secret(["wallet", "show", "--count", "3"])
+        # the repository's own label has no colon, and the seed may be
+        # printed upper-case: a redaction that only matched one exact
+        # spelling was a no-op against the format the CLI actually emits
+        assert seed not in redact_secrets(f"Master Seed   {seed}")
+        assert ("A" * 32) not in redact_secrets(f"master seed: {'A' * 32}")
+        assert ("cd" * 32) not in redact_secrets(
+            f"Secret Key    4896 bytes  {'cd' * 32}")
+        # a 12-word phrase is just as much of a recovery phrase as 24
+        p12 = " ".join(["abandon"] * 11 + ["art"])
+        assert p12 not in redact_secrets(f"phrase: {p12}")
+
+    def test_passphrase_never_echoed(self):
+        from qeuph.web.server import redact_argv
+        argv = ["wallet", "backup", "--passphrase", "hunter2SECRET",
+                "--network", "regtest"]
+        safe = redact_argv(argv)
+        assert "hunter2SECRET" not in safe
+        assert "hunter2SECRET" not in " ".join(safe)
+        # the recovery phrase passed to restore is masked too
+        phrase = " ".join(["abandon"] * 23 + ["art"])
+        safe = redact_argv(["wallet", "restore", "--from-mnemonic", phrase])
+        assert phrase not in " ".join(safe)
+        safe = redact_argv(["wallet", "restore",
+                            f"--from-mnemonic={phrase}"])
+        assert phrase not in " ".join(safe)

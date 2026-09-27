@@ -198,6 +198,29 @@ class TestTransactionCodec:
         assert tx.txid() == Transaction.deserialize(tx.serialize()).txid()
 
 
+async def open_peer(port):
+    """Connect a raw client to a node's P2P port and return (peer, writer).
+
+    The server registers the inbound peer from its own accept callback, so it
+    is not observable at the instant `open_connection` returns.  Polling
+    here is what keeps these tests from racing the accept loop instead of
+    relying on a fixed sleep that happens to be long enough.
+    """
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    return writer
+
+
+async def wait_peers(node, count=1, timeout=5.0):
+    """Wait until `node` has at least `count` registered peers."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if len(node.peers) >= count:
+            return list(node.peers)
+        await asyncio.sleep(0.01)
+    raise AssertionError(
+        f"no peer registered within {timeout}s (have {len(node.peers)})")
+
+
 class NodeHarness:
     """Two real nodes with real listeners, wired to each other."""
 
@@ -376,7 +399,7 @@ class TestTwoNodeSync:
             await a.node.start()
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", a.net.p2p_port)
-            peer = a.node.peers[0]
+            peer = (await wait_peers(a.node))[0]
             await peer.send("version", {"version": C.PROTOCOL_VERSION,
                                         "network": a.net.name, "height": 0,
                                         "timestamp": int(time.time())})
@@ -400,7 +423,7 @@ class TestTwoNodeSync:
             await a.node.start()
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", a.net.p2p_port)
-            peer = a.node.peers[0]
+            peer = (await wait_peers(a.node))[0]
             await peer.send("version", {"version": C.PROTOCOL_VERSION,
                                         "network": a.net.name, "height": 0,
                                         "timestamp": int(time.time())})
@@ -430,8 +453,7 @@ class TestHeightAdvertisement:
             await a.node.start()
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", a.net.p2p_port)
-            await asyncio.sleep(0.2)
-            peer = a.node.peers[0]
+            peer = (await wait_peers(a.node))[0]
             ver = {"version": C.PROTOCOL_VERSION, "network": a.net.name,
                    "height": 0, "timestamp": int(time.time())}
             await a.node._on_version(peer, dict(ver))
@@ -485,8 +507,7 @@ class TestHeightAdvertisement:
             await a.node.start()
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", a.net.p2p_port)
-            await asyncio.sleep(0.2)
-            peer = a.node.peers[0]
+            peer = (await wait_peers(a.node))[0]
             await a.node._on_version(peer, {
                 "version": C.PROTOCOL_VERSION, "network": a.net.name,
                 "height": 0, "timestamp": int(time.time())})
@@ -601,8 +622,7 @@ class TestPeerRules:
             await a.node.start()
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", a.net.p2p_port)
-            await asyncio.sleep(0.2)
-            peer = a.node.peers[0]
+            peer = (await wait_peers(a.node))[0]
             before = len(a.node._banned)
             with pytest.raises(PeerMisbehaved, match="network mismatch"):
                 await a.node._on_version(peer, {"version": 1,
@@ -622,8 +642,7 @@ class TestPeerRules:
             await a.node.start()
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", a.net.p2p_port)
-            await asyncio.sleep(0.2)
-            peer = a.node.peers[0]
+            peer = (await wait_peers(a.node))[0]
             with pytest.raises(PeerMisbehaved, match="too old"):
                 await a.node._on_version(peer, {"version": 0,
                                                 "network": a.net.name,
@@ -641,8 +660,7 @@ class TestPeerRules:
             await a.node.start()
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", a.net.p2p_port)
-            await asyncio.sleep(0.2)
-            peer = a.node.peers[0]
+            peer = (await wait_peers(a.node))[0]
             await a.node._on_version(peer, {
                 "version": C.PROTOCOL_VERSION, "network": a.net.name,
                 "height": 0, "timestamp": 1})
@@ -661,11 +679,22 @@ class TestPeerRules:
             await a.node.start()
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", a.net.p2p_port)
-            await asyncio.sleep(0.2)
-            peer = a.node.peers[0]
-            allowed = sum(1 for _ in range(C.PEER_MSG_BURST + 200)
-                          if peer.allow_message())
-            assert allowed <= C.PEER_MSG_BURST + 2
+            peer = (await wait_peers(a.node))[0]
+            # A token bucket starts full, so the first PEER_MSG_BURST calls
+            # pass, and it refills at PEER_MSG_BUDGET tokens/second after
+            # that.  The bound therefore has to be stated in terms of the
+            # time the loop actually took: asserting a fixed "+2" slack
+            # silently depends on 1700 Python-level iterations finishing in
+            # under 3.3 ms, which is not a property of the limiter.
+            attempts = C.PEER_MSG_BURST + 200
+            t0 = time.time()
+            allowed = sum(1 for _ in range(attempts) if peer.allow_message())
+            elapsed = time.time() - t0
+            refill = C.PEER_MSG_BUDGET * elapsed
+            # full bucket up front, plus whatever accrued while looping
+            assert allowed <= C.PEER_MSG_BURST + refill + 1
+            # ...and the bucket really does refuse, rather than passing all
+            assert allowed < attempts
             writer.close()
             await a.node.stop()
 
@@ -705,8 +734,7 @@ class TestPeerRules:
             await a.node.start()
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", a.net.p2p_port)
-            await asyncio.sleep(0.2)
-            peer = a.node.peers[0]
+            peer = (await wait_peers(a.node))[0]
             h = bytes(range(64))
             a.node._requested[h] = time.time()
             peer.requested.add(h)

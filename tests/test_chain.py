@@ -1,6 +1,4 @@
 """Chain manager + mempool integration tests on the regtest network."""
-import shutil
-
 import pytest
 
 from qeuph.config import REGTEST
@@ -19,13 +17,18 @@ def _hdr_bytes(header, nonce):
 from qeuph.crypto import address as addr_mod
 from qeuph.crypto import ml_dsa
 
-TMP = "/tmp/qeuph-tests-chain"
-
 
 @pytest.fixture()
-def net():
-    shutil.rmtree(TMP, ignore_errors=True)
-    return REGTEST.with_(data_dir=TMP)
+def net(tmp_path):
+    """A throwaway regtest profile with a private, per-test data directory.
+
+    `tmp_path` (never a fixed `/tmp/...` path) is what makes these tests
+    independent: a ChainManager keeps its SQLite file open for the life of
+    the store, so on Windows a `shutil.rmtree(..., ignore_errors=True)` of a
+    shared directory silently fails while a handle is still open, and the
+    next test would reopen the previous test's chain.
+    """
+    return REGTEST.with_(data_dir=str(tmp_path / "chain"))
 
 
 @pytest.fixture()

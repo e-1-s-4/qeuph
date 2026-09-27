@@ -87,6 +87,24 @@ about when comparing this tree to `QRL-master`.
 | Web UI | returned the master seed and the recovery phrase over HTTP | refused and redacted | an unauthenticated HTTP response is not a place for a seed |
 | RPC | no auth, no batches, HTTP 4xx for application errors | Basic auth, batch arrays, JSON-RPC error objects with HTTP 200 | matches JSON-RPC 2.0 and makes the port safe to expose deliberately |
 | pytest | a root-level `pytest.py` shim shadowed the real runner | removed; `pyproject.toml` holds the config | `python -m pytest` silently ran a hand-rolled runner instead of pytest |
+| packaging | no `pyproject.toml`, so setuptools could not discover packages | a real `pyproject.toml`: explicit package list, package data for the UI assets, `qeuph` console script, `[fast]`/`[dev]` extras | `pip install .` and `pip install -e ".[dev]"` — the two commands the README opens with — both failed outright |
+| coin selection | largest-first returned 2+ outputs of the *same* address, all stamped with one nonce | one input per address, with a clear error pointing at `sweep` | the primary spend path could not cover an amount above the largest single UTXO, and the transaction it built was rejected by every node |
+| `sweep` nonce | the counter came from the loop position, so a skipped UTXO left a gap | the nonce advances per *emitted* transaction | a gap made every later transaction fail `txnonce == chain_nonce+1` and wedged the address permanently |
+| `sweep` fee | a "dust bump" built a 999-quphi transaction, and a dead `change` branch claimed fresh addresses | sub-economic outputs are skipped; the dead branch and its docstring are gone | `sweep --broadcast` reported success for a transaction the relay floor rejects |
+| `sign_transaction` | signed every input with one key, overwriting the other public keys | single-input only, with an explicit error | inputs owned by other addresses ended up carrying the sender's key and could never validate |
+| wallet index | `_persist()` swallowed every write error | a failed write raises | a full disk silently re-issued an already-used address, defeating the rotation guarantee |
+| keystore inputs | KDF iterations and `next_index` were taken from the file unbounded | clamped (`60k..10M`, `0..2^32-1`) | a truncated or hand-edited file made every `Wallet.open` hang, for the web UI too |
+| keystore writes | PID-named temp file, no directory fsync, world-readable directory | `mkstemp` + directory fsync, `0700` directory | a predictable temp name could be pre-created as a symlink; a crash could lose the wallet |
+| `fips204.sign` | defaulted to `deterministic=True` while its docstring said hedged | hedged by default | any new call site would have silently leaked a repeated signature |
+| web: secrets | the response body echoed `argv`, carrying the plaintext passphrase, and the export refusal was matchable around with `--out-mnem` | `argv` is redacted, the parser tree uses `allow_abbrev=False`, and the redaction covers the CLI's own `Master Seed   <hex>` label | the wallet passphrase and the recovery phrase were returned over HTTP |
+| web: mainnet | only `/api/miner/start` was guarded | `/api/miner/payout` and the `startminer` RPC are guarded too | arming the miner on mainnet through `/api/rpc` bypassed the UI's own guard |
+| web: CORS | `Access-Control-Allow-Origin: *`, no auth | same-origin only | any page the operator visited could drive a wallet that spends funds and stop the node |
+| web: command surface | `chain truncate`/`reindex` and `rpc --url` were reachable | per-subcommand allowlist | `chain truncate` destroyed the embedded node's chain, and `rpc --url` was an SSRF primitive |
+| web: availability | unbounded `?count=`, no socket timeout, two responses per request on some error paths | clamped, `timeout = 120`, `HttpError` | one GET could permanently wedge the server, and an error path desynchronised keep-alive |
+| rpc: transport | a promised rate limit that was never wired up; mutating methods over GET; a non-ASCII `Authorization` crashed the handler | token bucket, read-only GET allowlist, bytes-safe auth compare | an unauthenticated flood or a plain `<img>` tag could drive the node |
+| rpc: blocking | `generate` mined inline on the event loop; `rescan` held `chain.lock` for a full re-validation | PoW in a worker thread; `rescan` outside the lock | one RPC call could stop the node servicing P2P and mempool traffic |
+| lock ordering | `_block_template` and the mempool took `chain.lock` and `mempool.lock` in opposite orders | mempool resolves height/MTP before locking; callers select before locking | a hard deadlock between an RPC thread and the event loop |
+| amounts | `round(x * 10**8)` on a binary float | `Decimal` with an exact-integer check | typed amounts did not always mean what was written, and banker's rounding could cost a quphi |
 
 ## Testing approach
 

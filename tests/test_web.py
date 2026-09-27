@@ -42,12 +42,15 @@ class WebClient:
 
 
 @pytest.fixture(scope="module")
-def web():
+def web(tmp_path_factory):
     from http.server import ThreadingHTTPServer
     from qeuph.web.server import QeuphHttpHandler
     import qeuph.web.server as ws
-    root = "/tmp/qeuph-web-pytest"
-    os.system(f"rm -rf {root}")
+    # tmp_path_factory (not a hard-coded "/tmp/..." path) so each module run
+    # gets a private data root.  A fixed path cannot be reused because the
+    # embedded node keeps its SQLite store open, so on Windows the removal
+    # below fails while a handle is live and the next run inherits state.
+    root = str(tmp_path_factory.mktemp("qeuph-web"))
     ws.NODE = NodeManager("regtest", data_root=root, port_offset=0)
     ws.NODE.wallet_path()          # make sure the data directory exists
     port = free_port()
@@ -62,7 +65,6 @@ def web():
         srv.server_close()
         ws.NODE.close()
         ws.NODE = None
-        os.system(f"rm -rf {root}")
 
 
 @pytest.fixture(scope="module", autouse=True)

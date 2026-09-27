@@ -48,6 +48,10 @@ class TestKeystore:
             keystore.save_wallet(path, seed, None)
             assert keystore.load_wallet(path, None) == seed
 
+    @pytest.mark.skipif(os.name == "nt",
+                       reason="Windows has no POSIX mode bits; os.chmod "
+                              "only toggles the read-only attribute, so the "
+                              "0600 guarantee is a POSIX-only property")
     def test_file_permissions(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "w.json")

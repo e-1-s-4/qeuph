@@ -45,16 +45,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import dataclasses
+import io
 import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 from qeuph import constants as C
 from qeuph.cli import main as cli_main
@@ -77,8 +80,11 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(_PKG_DIR))     # <repo>
 STATIC_DIRS = [
     os.path.join(_PKG_DIR, "static"),
     os.path.join(_REPO_ROOT, "web"),          # legacy top-level web/ directory
-    os.getcwd(),
 ]
+# Deliberately NOT os.getcwd(): serve_static allowlists by filename, so a
+# cwd containing an index.html would serve it from the trusted loopback
+# origin - and a wallet written to that path by another route would then be
+# reachable at the site root.
 STATIC_FILES = ("index.html", "app.js", "style.css", "favicon.svg")
 
 
@@ -347,23 +353,68 @@ def derive_address_from_wallet(path: str, index: int,
 # ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
+class HttpError(Exception):
+    """A route helper refused the request.
+
+    Raised instead of calling ``send_error_json`` from inside a helper whose
+    result is itself passed to ``send_json``: that pattern emitted TWO
+    complete HTTP responses onto one keep-alive connection (the inner 400
+    plus an outer 200 carrying ``null``), and the second response's status
+    line was then read as the next request on the socket.
+    """
+
+    def __init__(self, message: str, code: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
+# Serialises in-process CLI execution.  `contextlib.redirect_stdout` swaps a
+# PROCESS-global, so two concurrent /api/cli requests in a ThreadingHTTPServer
+# would otherwise interleave each other's output - and capture the embedded
+# node's own logging from unrelated threads.
+_CLI_LOCK = threading.Lock()
+
 NODE: Optional[NodeManager] = None
 CLI_TREE: Optional[dict] = None
 ALLOW_REMOTE = False
+
+# Bounds for caller-supplied list sizes.  These views do real work per item
+# (a PBKDF2 unlock plus an ML-DSA-87 keygen per derived address), so an
+# unbounded `count` is an unauthenticated CPU/thread wedge.
+MAX_ADDRESS_COUNT = 50
+MAX_BLOCK_LIMIT = 50
+# Same cap the JSON-RPC transport enforces (rpc.MAX_BATCH), so the web bridge
+# cannot be used to bypass it.
+MAX_WEB_BATCH = 32
+MAX_BODY_BYTES = 8 * 1024 * 1024
 
 
 class QeuphHttpHandler(BaseHTTPRequestHandler):
     server_version = f"qeuph/{C.VERSION}"
     protocol_version = "HTTP/1.1"
+    # Without this an idle keep-alive connection pins a worker thread in
+    # rfile.readline() forever (slow-loris / thread exhaustion).
+    timeout = 120
 
     # -- plumbing -------------------------------------------------------
     def log_message(self, fmt, *args):
         pass
 
     def send_cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # The UI is served from this same origin, so it needs no
+        # cross-origin grant at all.  `Access-Control-Allow-Origin: *` on an
+        # endpoint that can spend a wallet and stop the node means any page
+        # the operator visits can drive it with a readable response; the
+        # browser is not blocked from reaching loopback.  Same-origin only.
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        if origin and _same_origin(origin, host):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods",
+                             "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -383,16 +434,27 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass
+        return None
 
     def send_error_json(self, message: str, code: int = 400):
-        self.send_json({"error": message, "ok": False}, code)
+        return self.send_json({"error": message, "ok": False}, code)
 
     def read_body(self) -> dict:
         try:
             length = int(self.headers.get("Content-Length", 0))
         except ValueError:
             length = 0
-        if length <= 0 or length > 8 * 1024 * 1024:
+        if length > MAX_BODY_BYTES:
+            # A transport fault, so it gets a 4xx - not a 200 with a
+            # JSON-RPC application error.  The body is drained and the
+            # connection closed: leaving those bytes unread desynchronises a
+            # keep-alive stream, because they are then parsed as the next
+            # request line.
+            self._drain(length)
+            self.close_connection = True
+            raise HttpError(f"request body too large (max {MAX_BODY_BYTES} "
+                            f"bytes)", 413)
+        if length <= 0:
             return {}
         raw = self.rfile.read(length)
         try:
@@ -401,7 +463,24 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             return {}
         return doc if isinstance(doc, dict) else {"value": doc}
 
+    def _drain(self, length: int):
+        remaining = min(int(length), MAX_BODY_BYTES)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     # -- routing --------------------------------------------------------
+    def _int_param(self, parsed, name: str, default: int, lo: int, hi: int):
+        """Bounded integer query parameter; a bad or huge value is a 400."""
+        raw = (parse_qs(parsed.query).get(name) or [str(default)])[0]
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            raise HttpError(f"{name} must be an integer, got {raw!r}", 400)
+        return max(lo, min(hi, n))
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
@@ -417,9 +496,8 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             if path == "/api/status":
                 return self.send_json(NODE.status())
             if path == "/api/blocks":
-                q = parse_qs(parsed.query)
-                return self.send_json(self.blocks(
-                    int((q.get("limit") or ["15"])[0])))
+                limit = self._int_param(parsed, "limit", 15, 1, MAX_BLOCK_LIMIT)
+                return self.send_json(self.blocks(limit))
             if path == "/api/mempool":
                 return self.send_json(self.mempool_info())
             if path == "/api/peers":
@@ -430,9 +508,9 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             if path == "/api/crypto":
                 return self.send_json(self.crypto_info())
             if path == "/api/wallet/addresses":
-                q = parse_qs(parsed.query)
-                return self.send_json(NODE.address_report(
-                    int((q.get("count") or ["5"])[0])))
+                count = self._int_param(parsed, "count", 5, 1,
+                                        MAX_ADDRESS_COUNT)
+                return self.send_json(NODE.address_report(count))
             if path == "/api/cli":
                 return self.send_json(cli_tree())
             if path.startswith("/api/block/"):
@@ -444,6 +522,8 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
                 return self.send_json(self.one_address(
                     path[len("/api/address/"):]))
             return self.send_error_json("not found", 404)
+        except HttpError as e:
+            return self.send_error_json(e.message, e.code)
         except Exception as e:                       # never kill the server
             logger.exception("GET %s failed", path)
             return self.send_error_json(f"internal error: {e}", 500)
@@ -451,7 +531,10 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
-        data = self.read_body()
+        try:
+            data = self.read_body()
+        except HttpError as e:
+            return self.send_error_json(e.message, e.code)
         try:
             if path == "/api/rpc":
                 return self.send_json(self.rpc_bridge(data))
@@ -471,10 +554,20 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "threads": th,
                                        "miner": NODE.miner.stats()})
             if path == "/api/miner/payout":
+                # Setting a payout address is what makes the miner runnable,
+                # so it is part of the mainnet mining surface and is guarded
+                # exactly like /api/miner/start.  Guarding only the start
+                # route left `POST /api/rpc {"method":"startminer"}` as a
+                # way around it.
+                if NODE.network.is_mainnet:
+                    raise HttpError(
+                        "the UI will not arm a solo miner on mainnet; use "
+                        "`qeuph node --network mainnet --mine ADDR` from the "
+                        "terminal", 403)
                 payout = str(data.get("address", "")).strip()
                 ahash = addr_mod.address_to_hash(payout, NODE.network.hrp)
                 if ahash is None:
-                    return self.send_error_json(
+                    raise HttpError(
                         f"invalid {NODE.network.hrp} address", 400)
                 NODE.miner.set_payout(ahash)
                 return self.send_json({"ok": True, "payout": payout})
@@ -483,7 +576,7 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             if path == "/api/network":
                 name = str(data.get("network", "regtest"))
                 if name not in ("mainnet", "testnet", "regtest"):
-                    return self.send_error_json(f"unknown network {name}")
+                    raise HttpError(f"unknown network {name}")
                 if NODE.miner.is_mining():
                     NODE.miner.stop()
                 status = NODE.open(name)
@@ -491,6 +584,8 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             if path == "/api/crypto/test":
                 return self.send_json(self.crypto_test(data))
             return self.send_error_json("not found", 404)
+        except HttpError as e:
+            return self.send_error_json(e.message, e.code)
         except PermissionError as e:
             return self.send_error_json(str(e), 403)
         except Exception as e:
@@ -673,10 +768,11 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "node is not running"}
         # single call or a batch, exactly like the JSON-RPC daemon
         if isinstance(data.get("batch"), list):
-            out = []
-            for req in data["batch"]:
-                out.append(self._rpc_one(req))
-            return {"ok": True, "batch": out}
+            batch = data["batch"]
+            if len(batch) > MAX_WEB_BATCH:
+                return {"ok": False,
+                        "error": f"batch larger than {MAX_WEB_BATCH}"}
+            return {"ok": True, "batch": [self._rpc_one(r) for r in batch]}
         return self._rpc_one(data)
 
     def _rpc_one(self, req: dict) -> dict:
@@ -696,35 +792,36 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
 
     def miner_start(self, data: dict) -> dict:
         if NODE.network.is_mainnet:
-            return {"ok": False,
-                    "error": "the UI will not start a solo miner on mainnet; "
-                             "use `qeuph node --network mainnet --mine ADDR` "
-                             "from the terminal"}
+            raise HttpError(
+                "the UI will not start a solo miner on mainnet; use "
+                "`qeuph node --network mainnet --mine ADDR` from the "
+                "terminal", 403)
         payout = str(data.get("payout", "")).strip()
         if payout:
             ahash = addr_mod.address_to_hash(payout, NODE.network.hrp)
             if ahash is None:
-                return self.send_error_json(
-                    f"invalid {NODE.network.hrp} address", 400)
+                raise HttpError(f"invalid {NODE.network.hrp} address", 400)
             NODE.miner.set_payout(ahash)
         if NODE.miner.payout_hash is None:
-            return self.send_error_json(
+            raise HttpError(
                 "set a payout address first (POST /api/miner/payout)", 400)
-        threads = int(data.get("threads", NODE.miner.threads))
+        threads = max(1, min(16, int(data.get("threads", NODE.miner.threads))))
         NODE.miner.start(threads=threads)
         return {"ok": True, "mining": True, "miner": NODE.miner.stats()}
 
     def generate(self, data: dict) -> dict:
         if NODE.network.is_mainnet:
-            return {"ok": False, "error": "generate is not allowed on mainnet"}
+            raise HttpError("generate is not allowed on mainnet", 403)
         n = max(1, min(200, int(data.get("count", 1))))
         payout = str(data.get("address", "")).strip()
         if payout:
             ahash = addr_mod.address_to_hash(payout, NODE.network.hrp)
+            if ahash is None:
+                raise HttpError(f"invalid {NODE.network.hrp} address", 400)
         else:
             ahash = NODE.miner.payout_hash
         if ahash is None:
-            return self.send_error_json("no payout address", 400)
+            raise HttpError("no payout address", 400)
         res = NODE.submit_coro(NODE.rpc._generate_async(ahash, n),
                                timeout=max(60, n * 20))
         return {"ok": True, "count": n, "hashes": res["hashes"],
@@ -749,15 +846,32 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             argv += ["--passphrase", str(passphrase)]
         allowed = ALLOWED_WALLET_CMDS if wallet else ALLOWED_CLI_CMDS
         if not argv or argv[0] not in allowed:
-            return {"ok": False, "args": argv,
+            return {"ok": False, "args": redact_argv(argv),
                     "error": f"only {sorted(allowed)} may be run here"}
         if wallet and _exports_secret(argv):
-            return {"ok": False, "args": argv,
+            return {"ok": False, "args": redact_argv(argv),
                     "error": "the recovery phrase and the master seed are "
                              "never returned over HTTP; run "
                              "`qeuph wallet mnemonic` (or "
                              "`qeuph wallet backup --out-mnemonic`) in a "
                              "terminal you trust"}
+        # Per-subcommand allowlist: the group is not enough on its own.
+        if wallet and argv[0] == "wallet":
+            sub = _subcommand_arg(argv)
+            if sub is not None and sub not in ALLOWED_WALLET_SUBCOMMANDS:
+                return {"ok": False, "args": redact_argv(argv),
+                        "error": f"wallet {sub!r} is not available over HTTP "
+                                 f"(allowed: "
+                                 f"{sorted(ALLOWED_WALLET_SUBCOMMANDS)}); use "
+                                 f"the `qeuph wallet` command in a terminal"}
+        if argv[0] == "chain":
+            sub = _subcommand_arg(argv)
+            if sub is not None and sub not in ALLOWED_CHAIN_SUBCOMMANDS:
+                return {"ok": False, "args": redact_argv(argv),
+                        "error": f"chain {sub!r} is not available over HTTP "
+                                 f"(allowed: "
+                                 f"{sorted(ALLOWED_CHAIN_SUBCOMMANDS)}); it "
+                                 f"rewrites the node's database"}
         opts = _subcommand_options(argv)
         if "--network" in opts and not _has_flag(argv, "--network"):
             argv += ["--network", NODE.network.name]
@@ -767,59 +881,187 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             # they report the same chain the browser is looking at
             argv += ["--data-dir", NODE.network.data_dir]
         if wallet:
-            if "--path" in opts and not _has_flag(argv, "--path"):
-                argv += ["--path", NODE.wallet_path()]
-            if "--rpc" in opts:
-                if not _has_flag(argv, "--rpc"):
-                    argv += ["--rpc", NODE.rpc.url if NODE.rpc
-                             else f"http://{C.DEFAULT_RPC_HOST}:"
-                                  f"{NODE.network.rpc_port}/"]
-        import contextlib
-        import io
-        buf = io.StringIO()
-        err = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
-                cli_main.main(argv)
-            ok, code = True, 0
-        except SystemExit as e:
-            code = e.code if isinstance(e.code, int) else (0 if e.code is None
-                                                           else 1)
-            ok = code == 0
-            if not isinstance(e.code, int) and e.code:
-                err.write(str(e.code) + "\n")
-        except Exception as e:
-            logger.exception("cli %s failed", argv)
-            return {"ok": False, "args": argv, "error": str(e)}
-        return {"ok": ok, "exit_code": code, "args": argv,
+            # A caller-supplied --path selects WHICH wallet file to use, so
+            # the feature is kept; it is constrained instead of ignored.  The
+            # danger was never the path itself but writing a wallet document
+            # over something that matters (the embedded node's chain.db, for
+            # instance), so the target must be a .json file and must not land
+            # on the node's own data directory.
+            if "--path" in opts:
+                supplied = _flag_value(argv, "--path")
+                if supplied is not None:
+                    target = os.path.abspath(supplied)
+                    if not target.lower().endswith(".json"):
+                        raise HttpError(
+                            "wallet path must name a .json file", 400)
+                    data_dir = os.path.abspath(NODE.network.data_dir)
+                    if os.path.commonpath([target, data_dir]) == data_dir \
+                            and target != os.path.abspath(NODE.wallet_path()):
+                        raise HttpError(
+                            "refusing to write a wallet over the node's own "
+                            "data directory", 403)
+                else:
+                    argv += ["--path", NODE.wallet_path()]
+            if "--rpc" in opts and not _has_flag(argv, "--rpc") \
+                    and NODE.rpc is not None:
+                argv += ["--rpc", NODE.rpc.url]
+        # One CLI run at a time: redirect_stdout/stderr mutate process-global
+        # state, and the embedded node keeps logging from the event loop.
+        with _CLI_LOCK:
+            buf, err = io.StringIO(), io.StringIO()
+            # Never let a CLI subcommand block on a prompt: the server owns
+            # the real stdin, and getpass there would hang the worker thread
+            # forever instead of failing the request.
+            no_tty = io.StringIO()
+            old_stdin = sys.stdin
+            try:
+                sys.stdin = no_tty
+                with contextlib.redirect_stdout(buf), \
+                        contextlib.redirect_stderr(err):
+                    cli_main.main(argv)
+                ok, code = True, 0
+            except SystemExit as e:
+                code = e.code if isinstance(e.code, int) else (0 if e.code is None
+                                                               else 1)
+                ok = code == 0
+                if not isinstance(e.code, int) and e.code:
+                    err.write(str(e.code) + "\n")
+            except Exception as e:
+                logger.exception("cli %s failed", redact_argv(argv))
+                return {"ok": False, "args": redact_argv(argv),
+                        "error": str(e)}
+            finally:
+                sys.stdin = old_stdin
+        return {"ok": ok, "exit_code": code, "args": redact_argv(argv),
                 "stdout": redact_secrets(buf.getvalue()),
                 "stderr": redact_secrets(err.getvalue())}
 
 
-# 24-word BIP-39 phrase, and the hex master seed the CLI can print
+# argv elements that carry secret material and must never be echoed
+_SECRET_FLAGS = {"--passphrase", "--from-mnemonic", "--new-passphrase",
+                 "--old-passphrase"}
+
+
+def redact_argv(argv) -> list:
+    """Copy of argv with secret values masked.
+
+    The response body used to contain the literal `argv`, which carried the
+    wallet passphrase (appended by this handler) and any recovery phrase
+    passed to `wallet restore --from-mnemonic`.  Both therefore landed in
+    browser devtools, proxy logs and any response cache.
+    """
+    out = []
+    mask_next = False
+    for a in argv:
+        if mask_next:
+            out.append("<redacted>")
+            mask_next = False
+            continue
+        if a in _SECRET_FLAGS:
+            out.append(a)
+            mask_next = True
+            continue
+        if a.startswith("--") and "=" in a:
+            flag = a.split("=", 1)[0]
+            if flag in _SECRET_FLAGS:
+                out.append(f"{flag}=<redacted>")
+                continue
+        out.append(a)
+    return out
+
+
+# BIP-39 phrases (12/15/18/21/24 words) and the hex master seed the CLI can
+# print.  Case-insensitive and colon-optional because the repository's own
+# labels are "Master Seed   <hex>" (no colon) and a phrase may be printed in
+# any case; a redaction that only matched one exact spelling is no redaction.
 _MNEMONIC_RE = re.compile(
-    r"\b(?:[a-z]{3,8}\s+){23}[a-z]{3,8}\b")
+    r"\b(?:[a-z]{3,8}[\s,]+){11,23}[a-z]{3,8}\b", re.IGNORECASE)
 _MASTER_SEED_RE = re.compile(
-    r"(master seed[^:]*:\s*)([0-9a-f]{64})", re.IGNORECASE)
+    r"(master\s+seed\b[^\n]*?)([0-9a-f]{32,})", re.IGNORECASE)
+_SECRET_KEY_RE = re.compile(
+    r"(secret\s+key\b[^\n]*?)([0-9a-f]{32,})", re.IGNORECASE)
 
 
 def redact_secrets(text: str) -> str:
-    """Strip recovery phrases and master seeds from CLI output bound for HTTP."""
-    text = _MNEMONIC_RE.sub("[24-word recovery phrase redacted - "
-                            "run `qeuph wallet mnemonic` in a terminal]",
-                            text)
-    return _MASTER_SEED_RE.sub(r"\1[redacted]", text)
+    """Strip recovery phrases, master seeds and secret keys from CLI output
+    bound for HTTP."""
+    text = _MNEMONIC_RE.sub(
+        "[recovery phrase redacted - run `qeuph wallet mnemonic` in a "
+        "terminal]", text)
+    text = _MASTER_SEED_RE.sub(r"\1[redacted]", text)
+    return _SECRET_KEY_RE.sub(r"\1[redacted]", text)
 
 
 def _exports_secret(argv) -> bool:
-    """True when the subcommand would print key material."""
+    """True when the subcommand would print key material.
+
+    The pairing is explicit because several subcommands legitimately accept
+    an option that merely *consumes* a phrase (`wallet show --from-mnemonic`
+    names a wallet file to read), so testing for the presence of the option
+    name alone flags harmless invocations.
+
+    Abbreviations cannot be used to slip past this: the parser tree is built
+    with allow_abbrev=False, so `--out-mnem` is a hard parse error rather
+    than a synonym for `--out-mnemonic`.
+    """
     if argv[:2] == ["wallet", "mnemonic"]:
         return True
-    if argv[:2] == ["wallet", "backup"] and "--out-mnemonic" in argv:
+    if argv[:2] == ["wallet", "backup"] and _has_flag(argv, "--out-mnemonic"):
         return True
-    if "--show-seed" in argv:
+    if argv[:2] == ["wallet", "show"] and _has_flag(argv, "--show-seed"):
         return True
     return False
+
+
+def _is_loopback(host: str) -> bool:
+    """True when `host` provably resolves to a loopback address.
+
+    A string comparison against ("127.0.0.1", "::1", "localhost") trusts the
+    name: a hosts entry pointing "localhost" off-loopback would bind
+    publicly, and other loopback addresses such as 127.0.0.2 were refused for
+    no reason.  `ipaddress` decides from the address itself.
+    """
+    import ipaddress
+    h = (host or "").strip()
+    if not h:
+        return False          # "" binds every interface
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        pass
+    if h.lower() in ("localhost", "localhost.localdomain", "ip6-localhost"):
+        return True
+    return False
+
+
+def _flag_value(argv, flag: str) -> Optional[str]:
+    """The value of `--flag value` or `--flag=value` in argv, else None."""
+    for i, a in enumerate(argv):
+        if a == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def _subcommand_arg(argv) -> Optional[str]:
+    """The subcommand named in argv[1], or None when argv names no group."""
+    return argv[1] if len(argv) > 1 and not argv[1].startswith("-") else None
+
+
+def _same_origin(origin: str, host: str) -> bool:
+    """True when an Origin header refers to the Host we are serving."""
+    if not origin or "://" not in origin:
+        return False
+    try:
+        o = urlsplit(origin)
+    except ValueError:
+        return False
+    o_host = o.netloc.split("@")[-1].lower()
+    h = (host or "").split("@")[-1].lower()
+    if o.scheme not in ("http", "https"):
+        return False
+    return o_host == h or o_host == h.split(":")[0]
 
 
 def _subcommand_options(argv) -> set:
@@ -855,9 +1097,31 @@ def _has_flag(argv, flag: str) -> bool:
 
 # `node` and `web` are deliberately NOT here: a browser must not be able to
 # start a second daemon on the same data directory, nor nest a web server.
-ALLOWED_CLI_CMDS = {"mine", "rpc", "chain", "genesis", "emission",
+#
+# `rpc` is also excluded: the browser already has POST /api/rpc, and the
+# command's `--url` is an arbitrary outbound URL, so allowing it here turned
+# this endpoint into an SSRF primitive (and, because that subcommand takes
+# no --network, it silently targeted the MAINNET RPC port rather than the
+# embedded node).
+#
+# `mine` is excluded for the same reason as the miner routes: it is an
+# unbounded CPU/thread burner reachable without a flag.
+ALLOWED_CLI_CMDS = {"chain", "genesis", "emission",
                     "address", "crypto", "version"}
+# `chain truncate` and `chain reindex` rewrite or destroy the embedded
+# node's database, which is a node-state mutation rather than a command the
+# browser should be able to drive; the read-only `chain` verbs are allowed
+# per subcommand below.
+ALLOWED_CHAIN_SUBCOMMANDS = {"info", "blocks", "block", "tx", "verify"}
 ALLOWED_WALLET_CMDS = {"wallet"}
+# `backup --out`, `sign --out` and `restore --in` write to or read from a
+# caller-chosen path (an arbitrary file write / read), and `sign`/`passwd`
+# are key-material operations.  None belong on an HTTP surface.  `create` IS
+# allowed: the UI needs it to bootstrap a wallet, and because `--path` is
+# always forced to the node's own wallet file (below) it can only ever
+# create/overwrite that one file, which is what `wallet create` means.
+ALLOWED_WALLET_SUBCOMMANDS = {"show", "balance", "addresses", "newaddress",
+                              "send", "sweep", "verify", "utxos", "create"}
 
 
 # ---------------------------------------------------------------------------
@@ -906,7 +1170,7 @@ def serve(host: str = C.DEFAULT_WEB_HOST, port: int = C.DEFAULT_WEB_PORT,
     if embedded is not None:
         network = "regtest" if embedded == "off" else embedded
         start_node = embedded != "off"
-    if not allow_remote and host not in ("127.0.0.1", "::1", "localhost"):
+    if not allow_remote and not _is_loopback(host):
         raise SystemExit(
             f"refusing to bind {host}: the web suite exposes full node "
             f"control. Use --host 127.0.0.1, or pass --allow-remote if you "

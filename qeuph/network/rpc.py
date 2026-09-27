@@ -57,10 +57,32 @@ from qeuph.core.validation import TxValidationError
 
 logger = logging.getLogger("qeuph.rpc")
 
-MAX_RPC_BODY = 32 * 1024 * 1024      # hard cap on request bodies
+MAX_RPC_BODY = 1024 * 1024       # hard cap on request bodies
+# How much of a REJECTED body we are willing to read and throw away so the
+# error response can be delivered without the peer seeing a reset.
+MAX_DRAIN_BODY = 8 * 1024 * 1024
 MAX_BATCH = 32                       # max calls in one batch document
 RATE_LIMIT_CALLS = 120               # calls per second per connection
 RATE_LIMIT_WINDOW = 1.0
+# one token bucket per handler instance; the lock only guards the fields
+# themselves, and the handler class is recreated per RPCService
+_rate_lock = threading.Lock()
+
+# Methods reachable over GET.  Everything that mutates chain, mempool, miner
+# or node state is POST-only: a GET is what a link, an <img> tag and a
+# cross-origin fetch all issue, so the read-only surface must stay read-only.
+READ_ONLY_METHODS = frozenset({
+    "help",
+    "getblockchaininfo", "getblockcount", "getbestblockhash", "getblockhash",
+    "getblock", "getblockstats", "getdifficulty", "getchaintips",
+    "gettxout", "gettransaction", "getrawtransaction",
+    "decoderawtransaction", "createrawtransaction",
+    "getmempoolinfo", "getrawmempool", "getmempool",
+    "getbalance", "listutxos", "listunspent", "getnonce",
+    "validateaddress", "getaddressinfo",
+    "getnetworkinfo", "getpeerinfo", "getconnectioncount", "getnettotals",
+    "getnodeinfo", "getrewardinfo", "uptime",
+})
 
 # JSON-RPC 2.0 error codes
 E_PARSE = -32700
@@ -115,10 +137,61 @@ class RPCService:
             def log_message(self, fmt, *args):
                 pass
 
+            def _budget(self, n: int = 1) -> bool:
+                """Per-connection token bucket.
+
+                Without this one client could occupy a worker thread with an
+                unbounded call rate - `getmininginfo` alone burns 20,000
+                double-SHA3-512 hashes per call.
+                """
+                now = time.time()
+                with _rate_lock:
+                    if now - self._rl_last >= RATE_LIMIT_WINDOW:
+                        self._rl_tokens = float(RATE_LIMIT_CALLS)
+                        self._rl_last = now
+                    elif self._rl_tokens < n:
+                        return False
+                    else:
+                        self._rl_tokens -= n
+                return True
+
+            def _too_many(self):
+                self.close_connection = True
+                self._reply({"jsonrpc": "2.0", "id": None,
+                             "error": {"code": E_MISC_ERROR,
+                                       "message": "rate limit exceeded"}}, 429)
+
+            def setup(self):
+                # A token bucket per CONNECTION, established once here.
+                # Resetting it in handle_one_request() would refill on every
+                # request and the limit would never fire.
+                self._rl_tokens = float(RATE_LIMIT_CALLS)
+                self._rl_last = time.time()
+                super().setup()
+
+            def handle_one_request(self):
+                try:
+                    super().handle_one_request()
+                except (BrokenPipeError, ConnectionResetError):
+                    self.close_connection = True
+
             def send_cors(self):
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+                # Same-origin only.  A wildcard grant on a surface that can
+                # mine, submit blocks and stop the node lets any page the
+                # operator visits drive it, and browsers reach loopback
+                # freely.
+                origin = self.headers.get("Origin")
+                host = self.headers.get("Host", "")
+                if origin and "://" in origin:
+                    o = origin.split("://", 1)[1].split("/")[0].lower()
+                    h = (host or "").split("@")[-1].lower()
+                    if o == h or o == h.split(":")[0]:
+                        self.send_header("Access-Control-Allow-Origin", origin)
+                        self.send_header("Vary", "Origin")
+                        self.send_header("Access-Control-Allow-Methods",
+                                         "POST, GET, OPTIONS")
+                        self.send_header("Access-Control-Allow-Headers",
+                                         "Content-Type, Authorization")
 
             def do_OPTIONS(self):
                 self.send_response(200)
@@ -141,14 +214,83 @@ class RPCService:
                 header = self.headers.get("Authorization", "")
                 if not header.startswith("Basic "):
                     return False
-                return hmac.compare_digest(header[6:].strip(), svc._auth)
+                # compare_digest raises TypeError on non-ASCII str operands.
+                # Left unhandled it escaped do_POST/do_GET, and since
+                # handle_one_request has no handler for it the connection was
+                # dropped with no 401 at all - so a client sending a non-ASCII
+                # header killed its own connection instead of being
+                # challenged.  Compare bytes and treat anything odd as a
+                # failed authentication.
+                try:
+                    supplied = header[6:].strip().encode("utf-8", "replace")
+                    return hmac.compare_digest(supplied,
+                                               svc._auth.encode("ascii",
+                                                                "replace"))
+                except (TypeError, ValueError, UnicodeError):
+                    return False
+
+            def _drain_body(self):
+                """Read and discard the request body (bounded)."""
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                except ValueError:
+                    length = 0
+                if length <= 0:
+                    return
+                remaining = min(length, MAX_RPC_BODY)
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+
+            def _drain(self, length: int):
+                """Discard a rejected request body.
+
+                Draining (rather than just closing) is what lets the 413 be
+                delivered cleanly: closing a socket that still has unread
+                bytes queued makes the kernel send RST, and the client then
+                sees a reset instead of the status code.  The read is bounded
+                so a hostile Content-Length cannot turn this into a slow-read
+                amplifier.
+                """
+                remaining = min(int(length or 0), MAX_DRAIN_BODY)
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
 
             def _unauthorized(self):
+                # Reject before dispatch, but still consume the request body
+                # and end the connection.  Returning early with the body left
+                # in the socket desynchronises a keep-alive stream: the
+                # leftover body bytes are then read as the next request line,
+                # so the peer sees a truncated/aborted connection (on Windows
+                # that surfaces as WSAECONNABORTED) instead of a clean 401.
+                self._drain_body()
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", 'Basic realm="qeuph-rpc"')
                 self.send_cors()
                 self.send_header("Content-Length", "0")
+                self.send_header("Connection", "close")
                 self.end_headers()
+                self.close_connection = True
+
+            def _drain_body(self):
+                """Read and discard the request body (bounded)."""
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                except ValueError:
+                    length = 0
+                if length <= 0:
+                    return
+                remaining = min(length, MAX_RPC_BODY)
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
 
             def _single(self, req):
                 if not isinstance(req, dict):
@@ -204,16 +346,21 @@ class RPCService:
             def do_POST(self):
                 if not self._authed():
                     return self._unauthorized()
+                if not self._budget():
+                    return self._too_many()
                 try:
                     length = int(self.headers.get("Content-Length", 0))
                 except ValueError:
                     length = 0
                 if length < 0 or length > MAX_RPC_BODY:
-                    self._reply({"jsonrpc": "2.0", "id": None,
-                                 "error": {"code": E_INVALID_REQUEST,
-                                           "message": "request too large"}}, 413)
+                    # Transport fault -> 4xx.  Close BEFORE replying and drain
+                    # (bounded) so the unread body is not parsed as the next
+                    # request line on a keep-alive connection.
                     self.close_connection = True
-                    return
+                    self._drain(length)
+                    return self._reply({"jsonrpc": "2.0", "id": None,
+                                        "error": {"code": E_INVALID_REQUEST,
+                                                  "message": "request too large"}}, 413)
                 body = self.rfile.read(length) if length else b""
                 try:
                     doc = json.loads(body or b"{}")
@@ -224,14 +371,29 @@ class RPCService:
                 self._handle(doc)
 
             def do_GET(self):
-                """Read-only convenience: /?method=getblockchaininfo&params={}"""
+                """Read-only convenience: /?method=getblockchaininfo&params={}
+
+                Only genuinely read-only methods are reachable here.  A GET
+                is a link, an <img> tag and a cross-origin fetch are all GET,
+                so allowing `startminer`/`generate`/`stop` over GET turned an
+                unauthenticated read-only endpoint into a node-control and
+                DoS primitive.
+                """
                 if not self._authed():
                     return self._unauthorized()
+                if not self._budget():
+                    return self._too_many()
                 from urllib.parse import parse_qs, urlparse
                 q = parse_qs(urlparse(self.path).query)
                 method = (q.get("method") or [""])[0]
                 if not method:
                     return self._reply({"jsonrpc": "2.0", "id": None, "result": svc.help_doc()})
+                if method not in READ_ONLY_METHODS:
+                    return self._reply(
+                        {"jsonrpc": "2.0", "id": 1,
+                         "error": {"code": E_INVALID_REQUEST,
+                                   "message": f"{method} is not available over "
+                                              f"GET; use POST"}}, 200)
                 raw = (q.get("params") or ["{}"])[0]
                 try:
                     params = json.loads(raw)
@@ -611,13 +773,16 @@ class RPCService:
                         "maxbytes": C.MAX_MEMPOOL_SIZE,
                         "minrelayfee": C.MIN_RELAY_FEE_RATE}
         if method == "getmempool":
+            # all_txs() copies under mempool.lock; calling it unlocked made a
+            # concurrent add_tx raise "dictionary changed size during
+            # iteration" out of an RPC handler.
             return {"txids": [t.txid().hex() for t in self.node.mempool.all_txs()]}
         if method == "getrawmempool":
             verbose = bool(self._p(params, "verbose", False))
+            txs = self.node.mempool.all_txs()
             if verbose:
-                return {t.txid().hex(): t.to_dict(hrp)
-                        for t in self.node.mempool.all_txs()}
-            return [t.txid().hex() for t in self.node.mempool.all_txs()]
+                return {t.txid().hex(): t.to_dict(hrp) for t in txs}
+            return [t.txid().hex() for t in txs]
 
         # ---------------- mining ----------------
         if method == "generate":
@@ -644,6 +809,15 @@ class RPCService:
             except Exception as e:
                 raise RpcError(E_BLOCK_SUBMISSION, f"generate failed: {e}")
         if method == "startminer":
+            # The daemon owns the solo miner on mainnet (`node --mine ADDR`),
+            # so the remote-control surface must not be able to start one
+            # there.  Without this the web UI's /api/rpc bridge could arm the
+            # miner on mainnet, because only the UI route was guarded.
+            if net.is_mainnet:
+                raise RpcError(E_MISC_ERROR,
+                               "startminer is not allowed on mainnet; start "
+                               "the node with `qeuph node --network mainnet "
+                               "--mine ADDR` instead")
             if self.miner is None:
                 raise RpcError(E_MISC_ERROR, "miner not available")
             addr = self._p(params, "address", "") or ""
@@ -752,10 +926,14 @@ class RPCService:
         if method == "help":
             return self.help_doc()
         if method == "rescan":
+            # verify_chain() re-validates every canonical block against a
+            # scratch state.  Wrapping it in chain.lock froze the whole node:
+            # every other RPC reader, the event loop's connect_block() and
+            # consider_reorg() all queue behind the same lock, and a long
+            # chain makes the hold unbounded.  Let verify_chain take the lock
+            # itself (it does so in short, bounded spans) instead.
             height = self._p(params, "height")
-            with chain.lock:
-                return chain.verify_chain(
-                    None if height is None else int(height))
+            return chain.verify_chain(None if height is None else int(height))
         if method == "savewallet":
             path = self._p(params, "path")
             if not path:
@@ -818,6 +996,14 @@ class RPCService:
         from qeuph.core import pow as pow_mod
         chain = self.node.chain
         hrp = self.node.network.hrp
+        # Select from the mempool BEFORE taking chain.lock.  Doing it inside
+        # is a lock-order inversion: mempool.best_transactions() takes
+        # mempool.lock and then calls chain.median_time_past(), which takes
+        # chain.lock, while connect_block()/consider_reorg() take chain.lock
+        # and then mempool.lock via the reorg callback.  One RPC thread and
+        # the event loop grabbing them in opposite orders is a hard deadlock
+        # that would take the whole node down.
+        txs = self.node.mempool.best_transactions(C.MAX_BLOCK_SIZE - 200_000)
         with chain.lock:
             tip = chain.tip
             payout = self._p(params, "address", "") or ""
@@ -825,7 +1011,6 @@ class RPCService:
                      else (self.miner.payout_hash if self.miner else None))
             if ahash is None:
                 ahash = bytes(C.ADDRESS_HASH_SIZE)
-            txs = self.node.mempool.best_transactions(C.MAX_BLOCK_SIZE - 200_000)
             template, reward = chain.create_block_template(ahash, txs)
             return {
                 "version": C.BLOCK_VERSION,
@@ -851,13 +1036,20 @@ class RPCService:
     # ------------------------------------------------------------------
     async def _generate_async(self, ahash: bytes, nblocks: int) -> dict:
         """Regtest/testnet block generation on the event loop (thread-safe).
-        Blocks go through node.submit_block so peers receive the inv relay."""
+        Blocks go through node.submit_block so peers receive the inv relay.
+
+        The proof-of-work search runs in a worker thread.  `Block.mine()` is a
+        tight Python loop, so calling it inline here would block the event
+        loop for its whole duration and stop the node servicing P2P, mempool
+        and every other coroutine - with no way to recover, because the RPC
+        caller eventually times out while the coroutine keeps burning CPU.
+        """
         chain = self.node.chain
         hashes = []
         for _ in range(nblocks):
             txs = self.node.mempool.best_transactions(C.MAX_BLOCK_SIZE - 200_000)
             b, _ = chain.create_block_template(ahash, txs)
-            b.mine()
+            await asyncio.to_thread(b.mine)
             try:
                 ok = await self.node.submit_block(b, broadcast=True)
             except Exception as e:

@@ -2,7 +2,6 @@
 lock time, persistence, node shutdown, protocol hardening."""
 import asyncio
 import dataclasses
-import shutil
 import socket
 import time
 
@@ -20,14 +19,16 @@ from qeuph.crypto import address as addr_mod
 from qeuph.crypto import ml_dsa
 from qeuph.node.node import QNode
 
-TMP = "/tmp/qeuph-tests-overhaul"
-
-
 @pytest.fixture()
-def net():
-    shutil.rmtree(TMP, ignore_errors=True)
-    n = dataclasses.replace(REGTEST, data_dir=TMP)
-    return n
+def net(tmp_path):
+    """A private regtest profile per test.
+
+    A fixed `/tmp/...` directory cannot be reused here: the ChainManager
+    holds its SQLite store open, so on Windows `rmtree(ignore_errors=True)`
+    silently fails and the next test reopens the previous test's chain
+    instead of a fresh one.
+    """
+    return dataclasses.replace(REGTEST, data_dir=str(tmp_path / "chain"))
 
 
 @pytest.fixture()

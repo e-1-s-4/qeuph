@@ -75,10 +75,17 @@ def default_rpc_url(net) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # allow_abbrev=False everywhere: the web route's "never return key
+    # material" refusal inspects option names, and argparse's unambiguous
+    # prefix matching let `wallet backup --out-mnem` and
+    # `wallet show --show-s` run the blocked commands anyway.  Exact names
+    # also keep the browser's option list, which is generated from this same
+    # parser, honest.
     p = argparse.ArgumentParser(
         prog="qeuph",
         description="Qeuph (QUH) quantum-resistant cryptocurrency",
-        epilog="See `qeuph <command> --help` for details, or the README.")
+        epilog="See `qeuph <command> --help` for details, or the README.",
+        allow_abbrev=False)
     p.add_argument("--version", action="store_true",
                    help="print the version and exit")
     sub = p.add_subparsers(dest="cmd")
@@ -238,11 +245,30 @@ def build_parser() -> argparse.ArgumentParser:
     web = sub.add_parser("web", help="serve the node explorer / wallet UI")
     web.add_argument("--host", default=C.DEFAULT_WEB_HOST)
     web.add_argument("--port", type=int, default=C.DEFAULT_WEB_PORT)
-    web.add_argument("--network", default=None)
+    web.add_argument("--network", default="regtest",
+                     help="network for the embedded node (default: regtest, "
+                          "NOT mainnet)")
     web.add_argument("--data-dir", default=None)
     web.add_argument("--embedded-node", default=None,
                      choices=["regtest", "testnet", "mainnet", "off"],
                      help="run a node in-process (default: regtest)")
+    web.add_argument("--allow-remote", action="store_true",
+                     help="permit a non-loopback bind (you own the firewall)")
+
+    # allow_abbrev is a per-parser setting, so the flag on the root parser
+    # does not reach the subcommands - apply it across the whole tree.
+    def _no_abbrev(parser, seen=None):
+        seen = seen if seen is not None else set()
+        if id(parser) in seen:
+            return
+        seen.add(id(parser))
+        parser.allow_abbrev = False
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for sub_p in action.choices.values():
+                    _no_abbrev(sub_p, seen)
+
+    _no_abbrev(p)
     return p
 
 
@@ -255,6 +281,32 @@ def _net(args):
 
 def _with_data_dir(net, data_dir):
     return net.with_(data_dir=data_dir) if data_dir else net
+
+
+def _to_quphi(value, label: str) -> int:
+    """Convert a decimal QUH amount to quphi, exactly.
+
+    `round(x * 10**8)` on a binary float is lossy and applies banker's
+    rounding, so `--amount 0.000000005` silently became 0 and other values
+    landed a quphi or two away from what was typed.  Decimal parses the
+    literal the user actually wrote.
+    """
+    from decimal import Decimal, InvalidOperation
+    try:
+        d = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        raise SystemExit(f"{label} {value!r} is not a number")
+    scaled = d.scaleb(C.DECIMALS)
+    if scaled != scaled.to_integral_value():
+        # more precision than a quphi: refuse rather than round silently
+        raise SystemExit(
+            f"{label} {value!r} has more than {C.DECIMALS} decimal places")
+    q = int(scaled)
+    if q < 0:
+        raise SystemExit(f"{label} must not be negative")
+    if q > (1 << 64) - 1:
+        raise SystemExit(f"{label} exceeds the 64-bit quphi range")
+    return q
 
 
 def _default_wallet_path(net) -> str:
@@ -559,8 +611,8 @@ def cmd_wallet(args):
         print(f"total: {total / C.QUPHI_PER_QUH:.8f} QUH in {len(rows)} UTXOs")
     elif args.wcmd == "send":
         rpc = _rpc_url(args, net)
-        amount_quphi = round(args.amount * C.QUPHI_PER_QUH)
-        fee_quphi = round(args.fee * C.QUPHI_PER_QUH)
+        amount_quphi = _to_quphi(args.amount, "amount")
+        fee_quphi = _to_quphi(args.fee, "fee")
         tx = w.build_transaction(args.index, [(args.to, amount_quphi)],
                                  fee=fee_quphi, rpc_url=rpc,
                                  fresh_change=not args.no_fresh_change,
@@ -839,8 +891,12 @@ def cmd_crypto(args):
 def cmd_web(args):
     from qeuph.web.server import serve
     net = _with_data_dir(_net(args), args.data_dir)
-    serve(host=args.host, port=args.port, network=net,
-          embedded=args.embedded_node)
+    # serve() takes a network NAME; passing the Network object made
+    # `qeuph web` exit with "unknown network Network(name='mainnet', ...)",
+    # so a documented entry point simply did not start.
+    serve(host=args.host, port=args.port, network=net.name,
+          data_root=net.data_dir, embedded=args.embedded_node,
+          allow_remote=args.allow_remote)
 
 
 def cmd_version(args):

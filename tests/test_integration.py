@@ -5,7 +5,6 @@ regtest network, mines coinbase-matured blocks, creates a wallet, and
 executes a signed P2P-style transfer through the RPC surface.
 """
 import json
-import shutil
 import threading
 import time
 import urllib.request
@@ -15,17 +14,18 @@ import pytest
 from qeuph import constants as C
 from qeuph.config import REGTEST
 
-TMP = "/tmp/qeuph-tests-integration"
 # Network profiles are frozen singletons; derive a test-scoped copy so a test
 # module can never mutate the process-wide mainnet/testnet/regtest config.
-REGTEST = REGTEST.with_(data_dir=TMP, p2p_port=39777, rpc_port=39778)
+# The data directory and ports are replaced per test session by the `daemon`
+# fixture below (tmp_path_factory) so repeated runs never inherit chain state
+# through a store that is still open.
+REGTEST = REGTEST.with_(p2p_port=39777, rpc_port=39778)
 RPC = f"http://127.0.0.1:{REGTEST.rpc_port}/"
 
 
 @pytest.fixture(scope="module")
-def daemon():
-    shutil.rmtree(TMP, ignore_errors=True)
-    net = REGTEST
+def daemon(tmp_path_factory):
+    net = REGTEST.with_(data_dir=str(tmp_path_factory.mktemp("chain")))
     from qeuph.main import Daemon
     d = Daemon(net)
     holder = {}

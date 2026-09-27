@@ -1,6 +1,7 @@
 """Two-node P2P test: block + tx relay over a real TCP connection."""
 import asyncio
-import shutil
+import socket
+from pathlib import Path
 
 from qeuph.config import REGTEST
 from qeuph.core.chain import ChainManager
@@ -10,11 +11,6 @@ from qeuph.crypto import address as addr_mod
 from qeuph.crypto import ml_dsa
 from qeuph.node.node import QNode
 
-TMP1 = "/tmp/qeuph-tests-p2p-a"
-TMP2 = "/tmp/qeuph-tests-p2p-b"
-
-
-import socket
 
 def _get_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -22,14 +18,16 @@ def _get_free_port():
         return s.getsockname()[1]
 
 
-async def _run_scenario():
+async def _run_scenario(root):
+    tmp1 = str(Path(root) / "a")
+    tmp2 = str(Path(root) / "b")
     p1 = _get_free_port()
     r1 = _get_free_port()
     p2 = _get_free_port()
     r2 = _get_free_port()
 
     import dataclasses
-    net = dataclasses.replace(REGTEST, data_dir=TMP1, p2p_port=p1, rpc_port=r1)
+    net = dataclasses.replace(REGTEST, data_dir=tmp1, p2p_port=p1, rpc_port=r1)
 
     chain1 = ChainManager(net)
     mp1 = Mempool(chain1.state_provider(), height_fn=chain1.height)
@@ -37,7 +35,7 @@ async def _run_scenario():
     await node1.start()
 
     # second node: separate profile (own listen port + storage), same genesis
-    net2 = dataclasses.replace(net, data_dir=TMP2, p2p_port=p2, rpc_port=r2)
+    net2 = dataclasses.replace(net, data_dir=tmp2, p2p_port=p2, rpc_port=r2)
     chain2 = ChainManager(net2)
     mp2 = Mempool(chain2.state_provider(), height_fn=chain2.height)
     node2 = QNode(net2, chain2, mp2, connect_peers=[("127.0.0.1", p1)])
@@ -101,7 +99,5 @@ async def _run_scenario():
 
 
 class TestP2P:
-    def test_relay(self):
-        shutil.rmtree(TMP1, ignore_errors=True)
-        shutil.rmtree(TMP2, ignore_errors=True)
-        asyncio.run(_run_scenario())
+    def test_relay(self, tmp_path):
+        asyncio.run(_run_scenario(str(tmp_path)))

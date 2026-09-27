@@ -617,9 +617,15 @@ def sign_internal(sk: bytes, m_prime: bytes, rnd: bytes) -> bytes:
         return _sig_encode(ctilde, z, h)
 
 
-def sign(sk: bytes, message: bytes, ctx: bytes = b"", deterministic: bool = True) -> bytes:
+def sign(sk: bytes, message: bytes, ctx: bytes = b"", deterministic: bool = False) -> bytes:
     """ML-DSA.Sign (Algorithm 2).  Hedged by default per spec; deterministic
-    optional.  Qeuph wallet uses the hedged variant."""
+    optional.  Qeuph wallet uses the hedged variant.
+
+    The default is HEDGED (randomised `rnd`), matching FIPS 204 Algorithm 2
+    and the whitepaper's side-channel mitigation: a deterministic default
+    would make repeated signatures of the same message identical and leak.
+    Pass `deterministic=True` only when reproducibility is required.
+    """
     if len(ctx) > 255:
         raise ValueError("context too long")
     m_prime = bytes([0, len(ctx)]) + ctx + message

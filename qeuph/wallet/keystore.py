@@ -43,10 +43,16 @@ import hmac
 import json
 import os
 import secrets
+import tempfile
 from typing import Optional
 
 KDF_ITERATIONS = 600_000
 KDF_ITERATIONS_V1 = 60_000
+# Upper bound accepted when READING a wallet file.  PBKDF2-HMAC-SHA3-512 is
+# intentionally slow (~0.2 s at 600k), so an unbounded count taken from the
+# file would turn every open into an unbounded CPU burn.  Generous enough for
+# the next decade of stronger settings, tight enough to stay responsive.
+MAX_KDF_ITERATIONS = 10_000_000
 FORMAT = "qeuph-wallet"
 VERSION = 2
 AAD = b"qeuph-wallet-v2"
@@ -143,18 +149,36 @@ def save_wallet(path: str, master_seed: bytes, passphrase: Optional[str],
 
 
 def _write_atomic(path: str, doc: dict):
-    tmp = f"{path}.tmp.{os.getpid()}"
     d = os.path.dirname(os.path.abspath(path))
     if d:
-        os.makedirs(d, exist_ok=True)
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # 0700: the directory holds the wallet file and its temp name, and
+        # neither should be world-readable.
+        os.makedirs(d, mode=0o700, exist_ok=True)
+    # mkstemp creates the file with O_EXCL and a random name, so it can
+    # neither collide with a concurrent writer in the same process nor be
+    # pre-created by a local attacker pointing a symlink at another file.
+    fd, tmp = tempfile.mkstemp(dir=d or ".", prefix=os.path.basename(path) + ".",
+                               suffix=".tmp")
     try:
+        os.chmod(tmp, 0o600)
         with os.fdopen(fd, "w") as f:
             json.dump(doc, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
         os.chmod(path, 0o600)
+        # fsync the directory so the rename itself is durable; without it a
+        # crash can lose the file that was just written.
+        if d:
+            try:
+                dfd = os.open(d, os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+            except OSError:
+                # not fatal: not every filesystem allows opening a directory
+                pass
     except Exception:
         try:
             os.unlink(tmp)
@@ -178,8 +202,22 @@ def load_wallet(path: str, passphrase: Optional[str]) -> bytes:
         raise WalletError(f"unsupported wallet version {version}")
     try:
         kdf = doc["kdf"]
+        # The iteration count comes from the file, so it is attacker- or
+        # corruption-controlled input on the open path.  PBKDF2 is
+        # deliberately slow: an implausible value turns every `Wallet.open`
+        # (and therefore every web-UI wallet request) into a hang.  Refuse
+        # anything outside the range a real file can legitimately hold.
+        try:
+            iterations = int(kdf["iterations"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WalletError("wallet file has no usable kdf iteration count") \
+                from exc
+        if not (KDF_ITERATIONS_V1 <= iterations <= MAX_KDF_ITERATIONS):
+            raise WalletError(
+                f"implausible kdf iteration count {iterations} "
+                f"(expected {KDF_ITERATIONS_V1}..{MAX_KDF_ITERATIONS})")
         key = _kdf(passphrase or "", bytes.fromhex(kdf["salt"]),
-                   int(kdf["iterations"]))
+                   iterations)
     except (KeyError, ValueError) as e:
         raise WalletError(f"wallet file is missing key material: {e}")
     if "aes" in doc:
@@ -192,12 +230,18 @@ def load_wallet(path: str, passphrase: Optional[str]) -> bytes:
         except Exception:
             raise WalletError("wrong passphrase (or corrupted wallet)")
     fb = doc.get("fallback")
-    if not fb:
+    if not fb or not isinstance(fb, dict):
         raise WalletError("wallet file has no ciphertext")
-    iv = bytes.fromhex(fb["iv"])
-    ct = bytes.fromhex(fb["ciphertext"])
+    try:
+        iv = bytes.fromhex(fb["iv"])
+        ct = bytes.fromhex(fb["ciphertext"])
+        stored_mac = bytes.fromhex(fb["mac"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise WalletError(f"wallet file is corrupted: {exc}") from exc
     mac = hashlib.sha3_512(key + iv + ct).digest()
-    if not hmac.compare_digest(mac.hex(), fb["mac"]):
+    # compare_digest raises TypeError on mismatched types, so normalise
+    # first: a tampered file must fail authentication, not crash the loader
+    if not hmac.compare_digest(mac, stored_mac):
         raise WalletError("wrong passphrase (or corrupted wallet)")
     seed = _xor(ct, hashlib.sha3_512(key + iv).digest())
     if len(seed) != 32:

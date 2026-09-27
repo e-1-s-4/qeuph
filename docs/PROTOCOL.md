@@ -82,8 +82,15 @@ output := value(8 LE quphi) addr_hash(64)
 * **One input per address per transaction.** The txnonce rule is per
   address, so a transaction spending two outputs of the same address would
   require the same address to present two different nonces equal to
-  `chain_nonce+1`. Such a transaction is rejected; `wallet sweep` therefore
-  chains one transaction per output with nonces `n, n+1, …`.
+  `chain_nonce+1`. Such a transaction is rejected. This constrains the
+  *wallet* as much as the network: `wallet send` funds from a single address
+  and therefore may spend exactly one of its outputs, so an amount above the
+  largest single output is refused with an explicit message pointing at
+  `sweep`, rather than assembled into a transaction every node would reject.
+  `wallet sweep` chains one transaction per output with contiguous nonces
+  `n, n+1, …`; an output too small to cover the relay fee is skipped, and
+  because the nonce is advanced per *emitted* transaction, skipping one
+  leaves no gap.
 * Lock time (Bitcoin semantics): a non-zero `lock_time` makes the
   transaction non-final until either the chain height reaches it
   (`lock_time < 500,000,000`) or the median time past of the last 11
@@ -195,6 +202,13 @@ because of the per-epoch floor.
   enter the pool before the one with nonce *n*.
 * Block templates are ranked by the fee-per-byte cached at admission time
   (the overlay mutates, so fees cannot be recomputed later).
+* **Lock ordering.** The mempool never calls into the chain while holding
+  `mempool.lock`. `median_time_past()` takes `chain.lock`, and
+  `consider_reorg()` holds `chain.lock` while invoking the reorg callback
+  that takes `mempool.lock`; resolving the height and MTP *before*
+  acquiring `mempool.lock`, and having callers such as `_block_template`
+  select from the mempool *before* taking `chain.lock`, keeps the two
+  locks strictly ordered (`mempool` → never `chain`).
 
 ## Fork choice
 
@@ -274,19 +288,47 @@ is skipped rather than desynchronising the stream.
 
 JSON-RPC 2.0 over HTTP on port 19091 (mainnet), loopback by default.
 `POST` takes a document or a batch array; `GET /?method=…&params=…` serves
-read-only calls. Application errors are returned as `error` objects with
-**HTTP 200**, as the specification requires; only transport faults (bad
+**read-only** calls only. Application errors are returned as `error` objects
+with **HTTP 200**, as the specification requires; only transport faults (bad
 auth, oversized body, unparseable body) use 4xx. Optional HTTP Basic auth via
 `--rpc-user` / `--rpc-password`.
 
+Transport rules:
+
+* **GET is read-only.** A mutating method over GET is refused with
+  `-32600`. A GET is what a link, an `<img>` tag and a cross-origin fetch
+  all issue, so an unauthenticated read-only endpoint must not also be a
+  node-control and DoS primitive.
+* **CORS is same-origin.** The wildcard `Access-Control-Allow-Origin: *` is
+  not sent; the request's own `Origin` is echoed only when it matches the
+  `Host` being served. Browsers reach loopback freely, so a wildcard grant
+  on a surface that can mine, submit blocks and stop the node lets any page
+  the operator visits drive it.
+* **Rate limiting.** Each connection gets a 120 call/second token bucket
+  (1-second window) and receives HTTP 429 with `Connection: close` when it is
+  exhausted. `getmininginfo` alone performs 20,000 double-SHA3-512 hashes, so
+  an unbounded call rate is a real CPU sink.
+* **Bodies** are capped at 1 MiB. A rejected body is read and discarded
+  (up to 8 MiB) and the connection is then closed, so the client receives a
+  clean status code instead of a reset caused by unread bytes.
+* **Auth failures** drain the body and answer `401` with
+  `Connection: close`; a malformed or non-ASCII `Authorization` header is
+  treated as a failed authentication rather than an exception.
+
 Block generation (`generate`, regtest/testnet only) is scheduled on the
-node's event loop so RPC threads never race consensus state. See README.md
-for the method list.
+node's event loop so RPC threads never race consensus state; the
+proof-of-work search runs in a worker thread, because a synchronous search
+on the event loop would stop the node servicing P2P and mempool traffic for
+its whole duration. `startminer` is likewise refused on mainnet — the daemon
+owns the solo miner there (`node --mine ADDR`).
+
+`rescan` no longer holds `chain.lock` around a full-chain re-validation,
+which previously froze every other RPC reader and the event loop.
 
 The node deliberately implements **no signing and no key storage**: the RPC
 surface is a remote-control surface for the chain, and keeping private keys
 off it removes a whole class of exposure. Use `qeuph wallet` for anything that
-touches keys.
+touches keys. See README.md for the method list.
 
 ## Web suite
 
@@ -301,11 +343,88 @@ serves a node explorer on 127.0.0.1:3000. Its contract:
   live argparse tree so the UI cannot offer an option the CLI lacks;
 * the master seed and the 24-word recovery phrase are **never** returned:
   `wallet mnemonic`, `wallet backup --out-mnemonic` and `--show-seed` are
-  refused by the web route, and phrase/seed-shaped text is redacted from any
-  CLI output before it leaves the process;
-* the bind address is loopback unless `--allow-remote` is passed, and the
-  embedded node runs regtest by default with the miner controls disabled on
-  mainnet.
+  refused by the web route, phrase/seed/secret-key-shaped text is redacted
+  from any CLI output before it leaves the process, and the `argv` echoed
+  back in the response has `--passphrase` / `--from-mnemonic` values masked;
+* the bind address is loopback unless `--allow-remote` is passed (decided
+  with `ipaddress.is_loopback`, so `localhost` and `127.0.0.2` are accepted
+  and `""` / `0.0.0.0` are not), and the embedded node runs regtest by
+  default with the miner controls disabled on mainnet.
+
+Command surface. The allowlist is a group *and* a per-subcommand set, so
+the HTTP surface cannot reach the dangerous verbs:
+
+| route | allowed |
+|---|---|
+| `POST /api/cli` | `chain info\|blocks\|block\|tx\|verify`, `genesis`, `emission`, `address`, `crypto`, `version` |
+| `POST /api/wallet` | `show`, `balance`, `addresses`, `newaddress`, `send`, `sweep`, `verify`, `utxos`, `create` |
+
+Excluded, with reasons:
+
+* `node` / `web` — a second daemon on the same data directory, or a nested
+  web server.
+* `rpc` — `--url` is an arbitrary outbound URL, so allowing it turned this
+  endpoint into an SSRF primitive; the browser already has `POST /api/rpc`.
+* `mine` — an unbounded CPU and thread burner reachable without a flag.
+* `chain truncate` / `chain reindex` — they rewrite or destroy the embedded
+  node's database; that is a node-state mutation, not a browser command.
+* `wallet sign` / `passwd` / `backup` / `restore` / `mnemonic` — key
+  material, and `backup --out` / `sign --out` are arbitrary file writes.
+
+Transport rules mirror the JSON-RPC surface: same-origin CORS only, an 8 MiB
+body cap answered with 413 and `Connection: close` (body drained), a
+120-second socket timeout, bounded `limit`/`count` query parameters
+(`?limit=abc` is a 400, not a 500), a 32-call cap on `/api/rpc` batches, and
+exactly one HTTP response per request — route helpers raise `HttpError`
+rather than writing an error response from inside a `send_json` wrapper,
+which previously emitted two complete responses on one keep-alive connection.
+In-process CLI runs are serialised with a lock, because
+`redirect_stdout`/`redirect_stderr` mutate process-global state, and
+`sys.stdin` is replaced so a subcommand can never block on a `getpass`
+prompt inside a worker thread.
+
+## Wallet keystore
+
+The master seed is sealed with AES-256-GCM under a PBKDF2-HMAC-SHA3-512 key
+(`dklen=32`), with a fresh 32-byte salt and 12-byte GCM nonce on every save.
+`cryptography` is optional; without it a documented SHA3-512 keystream XOR
+with encrypt-then-MAC is used and flagged in the file.
+
+* **Iteration count.** The shipped default is **600,000** (file `version` 2);
+  `version` 1 files declaring 60,000 still open, and
+  `$QEUPH_WALLET_KDF_ITERATIONS` overrides the default for new files.
+
+  > **Deviation from the whitepaper, deliberate.** Appendix text specifies
+  > "PBKDF2-HMAC-SHA3-512 with 60,000 iterations". The implementation ships
+  > 600,000 for new wallets, ten times the paper's figure, and reads the
+  > older 60,000 files unchanged. Raising the work factor is a local,
+  > non-consensus choice: the iteration count is recorded per file and
+  > covered by the AEAD tag, so it never affects chain validity or
+  > interoperation, and a v1 wallet opens on any build. The 60,000 figure
+  > remains supported rather than deprecated.
+
+* **Integrity of the metadata.** The salt and iteration count are
+  authenticated implicitly (changing either changes the derived key and
+  fails the GCM tag). `network` and `hrp` are read back and validated on
+  open: a file whose network or address prefix does not match the requested
+  one is refused rather than silently reporting zero balances, and both
+  fields must be consistent.
+* **Bounded inputs.** The KDF iteration count read from the file is clamped
+  to `60,000 .. 10,000,000` and the persisted `next_index` to
+  `0 .. 2^32-1`. PBKDF2 is deliberately slow and the index drives a keygen
+  loop, so an implausible value in a truncated or hand-edited file would
+  otherwise hang every open.
+* **Writes.** The file is written through a `mkstemp` temp file in the same
+  directory (mode 0600, no symlink following, no name collision between
+  concurrent writers), fsynced, atomically renamed, and the parent directory
+  is fsynced so the rename is durable. The directory is created 0700.
+* **Persisted index.** `next_index` is written back after every derived
+  address, and a failed write is a hard error rather than a silent one: a
+  swallowed failure would re-issue an address on the next run, which is
+  exactly the rotation guarantee the index exists to provide.
+* **Signing is hedged by default.** `fips204.sign()` defaults to the
+  randomised FIPS 204 variant, matching its own documentation; deterministic
+  signing is opt-in via `deterministic=True`.
 
 ## Genesis
 

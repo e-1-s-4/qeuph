@@ -1,1 +1,71 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
+[project]
+name = "qeuph"
+version = "2.0.0"
+description = "Qeuph (QUH): a quantum-resistant cryptocurrency. ML-DSA-87 (FIPS 204) signatures, double SHA3-512 proof of work, Bech32m addresses, a UTXO + txnonce ledger, two-thirding emission capped at 31,500,000 QUH, a JSON-RPC node, a CLI and a node explorer."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Qeuph contributors" }]
+keywords = [
+    "blockchain",
+    "post-quantum",
+    "cryptocurrency",
+    "ml-dsa",
+    "fips204",
+    "sha3-512",
+    "proof-of-work",
+    "bech32m",
+    "quantum-resistant",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security :: Cryptography",
+    "Topic :: System :: Distributed Computing",
+]
+
+# No mandatory third-party dependencies: the whole node suite is pure Python
+# and hashlib provides SHA3-512 / SHAKE (FIPS 202).
+dependencies = []
+
+[project.optional-dependencies]
+# OpenSSL / AWS-LC ML-DSA-87 backend: ~50,000 signatures/s instead of ~20/s.
+fast = ["cryptography>=45"]
+dev = ["pytest>=7", "cryptography>=45"]
+
+[project.urls]
+Homepage = "https://github.com/e-1-s-4/qeuph"
+Documentation = "https://github.com/e-1-s-4/qeuph/blob/main/docs/PROTOCOL.md"
+Source = "https://github.com/e-1-s-4/qeuph"
+Whitepaper = "https://github.com/e-1-s-4/qeuph/blob/main/Qeuph_QUH_Whitepaper.pdf"
+
+[project.scripts]
+qeuph = "qeuph.cli.main:main"
+
+[tool.setuptools]
+# Explicit package list: the repository root also holds tests/, tools/, docs/
+# and a landing-page index.html, which must never be picked up as packages.
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["qeuph*"]
+exclude = ["tests*", "tools*", "docs*", "tmp*"]
+
+[tool.setuptools.package-data]
+"qeuph.web" = ["static/*"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:qeuph.*"]

@@ -142,6 +142,10 @@ All three start the same server. Options:
 `npm run` shortcuts: `start`, `dev` (verbose), `regtest`, `testnet`,
 `mainnet` (read-only), `node`, `node:mainnet`, `cli`, `test`, `smoke:web`.
 
+`qeuph web` takes the same flags as the module (`--network` defaults to
+`regtest`, not mainnet) and additionally accepts `--allow-remote`, matching
+the loopback policy enforced by the server itself.
+
 ### How the UI stays in sync with the CLI
 
 The browser never talks to a private back door:
@@ -153,8 +157,23 @@ The browser never talks to a private back door:
 * **Commands** go through `POST /api/cli` and `POST /api/wallet`, which run
   the literal `qeuph` subcommands in-process. `GET /api/cli` returns the live
   argparse tree, so the in-browser console can never offer an option the CLI
-  does not have. Run `node`, `web` and `wallet` key material commands are
-  refused from the browser.
+  does not have. `Run`, `node` and `web` key-material commands are refused
+  from the browser.
+
+The allowlist is a group *and* a per-subcommand set, so the HTTP surface
+cannot reach the dangerous verbs even indirectly:
+
+| route | allowed |
+|---|---|
+| `POST /api/cli` | `chain info\|blocks\|block\|tx\|verify`, `genesis`, `emission`, `address`, `crypto`, `version` |
+| `POST /api/wallet` | `show`, `balance`, `addresses`, `newaddress`, `send`, `sweep`, `verify`, `utxos`, `create` |
+
+`rpc` is excluded because its `--url` is an arbitrary outbound URL (the
+browser has `POST /api/rpc` instead), `mine` because it is an unbounded CPU
+and thread burner, `chain truncate`/`reindex` because they rewrite or
+destroy the embedded node's database, and `wallet sign`/`passwd`/`backup`/
+`restore`/`mnemonic` because they touch key material or write to
+caller-chosen paths.
 
 ### Key safety properties of the UI
 
@@ -163,15 +182,29 @@ The browser never talks to a private back door:
   passphrase that is never stored.
 * The **master seed and the 24-word recovery phrase are never returned over
   HTTP.** `wallet mnemonic` and `wallet backup --out-mnemonic` are refused by
-  the web route, and any phrase-shaped or seed-shaped text in CLI output is
-  redacted before it leaves the process. Use `qeuph wallet mnemonic` in a
-  terminal you trust.
+  the web route; the `argv` echoed in the response has `--passphrase` and
+  `--from-mnemonic` values masked; and phrase-, seed- and secret-key-shaped
+  text is redacted from any CLI output before it leaves the process. Use
+  `qeuph wallet mnemonic` in a terminal you trust. (The refusal is matched
+  against exact option names, and the parser tree is built with
+  `allow_abbrev=False`, so `--out-mnem` cannot be used to slip past it.)
 * The server **binds loopback by default** and refuses any other address
-  without `--allow-remote`.
+  without `--allow-remote`. The check uses `ipaddress.is_loopback`, so
+  `localhost` and `127.0.0.2` are accepted while `""` and `0.0.0.0` — which
+  would bind every interface — are not.
 * It runs **regtest by default**, and the miner controls are disabled on
-  mainnet, so the UI cannot spend or reorganise real value by accident.
+  mainnet, so the UI cannot spend or reorganise real value by accident. The
+  guard covers `POST /api/miner/start`, `POST /api/miner/payout` *and* the
+  `startminer` RPC method, so arming the miner through `/api/rpc` is not a
+  way around it.
+* **CORS is same-origin only.** `Access-Control-Allow-Origin: *` is not
+  sent; the request's own `Origin` is echoed only when it matches the `Host`.
 * Network switching derives a new immutable profile; the module-level
   mainnet/testnet/regtest configuration can never be mutated.
+* The HTTP handler carries a 120-second socket timeout, caps request bodies
+  at 8 MiB, bounds `?limit=`/`?count=` (an unbounded `count` ran a PBKDF2
+  unlock plus a keygen per index and could wedge the server), and emits
+  exactly one HTTP response per request.
 
 ---
 
@@ -188,11 +221,21 @@ python3 -m qeuph.cli.main rpc getblockchaininfo
 python3 -m qeuph.cli.main rpc getblock --url http://127.0.0.1:19091/ '{"height": 0}'
 ```
 
-* `POST` with a JSON-RPC 2.0 document, or a **batch** (a JSON array).
-* `GET /?method=…&params=…` for read-only calls.
+* `POST` with a JSON-RPC 2.0 document, or a **batch** (a JSON array, capped
+  at 32 calls).
+* `GET /?method=…&params=…` for **read-only** calls. A mutating method over
+  GET is refused: a GET is what a link, an `<img>` tag and a cross-origin
+  fetch all issue, so the read-only endpoint must not double as a
+  node-control surface.
 * Application errors come back as JSON-RPC `error` objects with HTTP 200, as
   the specification requires; only transport faults use 4xx.
 * Optional HTTP Basic auth via `--rpc-user` / `--rpc-password`.
+* 120 calls/second per connection, then HTTP 429; bodies capped at 1 MiB.
+* CORS is **same-origin only** — the wildcard `Access-Control-Allow-Origin: *`
+  is never sent, because a browser reaches loopback freely and this surface
+  can mine, submit blocks and stop the node.
+* `startminer` and `generate` are refused on mainnet; the daemon owns the
+  solo miner there (`node --network mainnet --mine ADDR`).
 
 Methods (see `rpc help`):
 
@@ -248,11 +291,19 @@ whitepaper. A transaction is valid when
 input.txnonce == chain_nonce(address) + 1
 ```
 
-which gives deterministic ordering and replay protection on top of the UTXO
-model, independently of which UTXO is spent. Because the rule is per *address*,
-a single transaction may spend at most one output of any given address — the
-wallet's `sweep` therefore chains one transaction per output with nonces
-`n, n+1, …`.
+Because the rule is per *address*, a single transaction may spend at most
+one output of any given address. That is enforced on both sides: a node
+rejects a transaction that presents two inputs from one address, and the
+wallet never builds one — `wallet send` funds from a single address and so
+spends exactly one of its outputs, refusing an amount above the largest
+single output with a message pointing at `sweep` instead of assembling a
+transaction every node would reject. `sweep` is the way to consolidate: it
+chains one transaction per output with **contiguous** nonces `n, n+1, …`,
+paying each output's value minus the fee straight to the destination. An
+output too small to cover the relay fee is skipped, and because the counter
+advances per *emitted* transaction, skipping one leaves no gap — a gap
+would make every later transaction fail `txnonce == chain_nonce + 1` and
+wedge the address permanently.
 
 Each input carries an ML-DSA-87 signature over
 `dhash(sigless-tx) || LE32(input_index)`, so every byte of the transaction —
@@ -329,11 +380,16 @@ qeuph/
 │   ├── main.py                     daemon wiring
 │   ├── cli/main.py                 command line interface
 │   └── web/server.py               node explorer + CLI-synced HTTP surface
-├── web/                            index.html, app.js, style.css, favicon.svg
-├── tests/                          365 tests
-├── tools/                          mine_genesis.py, web_smoke.py
+│       └── static/                 index.html, app.js, style.css, favicon.svg
+├── tests/                          408 tests
+├── tools/                          mine_genesis.py, web_smoke.py,
+│                                   e2e_check.py, wp_conformance.py
 └── docs/                           PORTING.md, PROTOCOL.md
 ```
+
+The UI assets live **inside the package** (`qeuph/web/static/`) so the web
+suite works identically from a source checkout and from an installed wheel;
+they are declared as package data in `pyproject.toml`.
 
 ---
 
@@ -344,7 +400,7 @@ pip install -e ".[dev]"
 python3 -m pytest tests/ -q
 ```
 
-365 tests, no network access required, ~100 s. Coverage:
+408 tests, no network access required, ~170 s. Coverage:
 
 * **Whitepaper conformance** (`test_whitepaper.py`) — the pinned genesis
   hash, every Appendix A parameter, the Table 5 emission values, the
@@ -374,11 +430,21 @@ python3 -m pytest tests/ -q
   height must be re-advertised or a node that was level at handshake time
   never notices it fell behind, and a `--connect` peer that is not listening
   yet must be retried instead of waiting for the next discovery sweep.
-* **RPC** (`test_rpc.py`) — JSON-RPC 2.0 conformance, batch handling, Basic
-  auth, and the full method set against a live node.
+* **RPC** (`test_rpc.py`, `test_rpc_hardening.py`) — JSON-RPC 2.0
+  conformance, batch handling, Basic auth, the full method set against a
+  live node, the per-connection rate limit, the read-only GET allowlist,
+  same-origin CORS, oversized-body handling and exact decimal amount
+  conversion.
 * **Wallet** (`test_wallet_suite.py`) — derivation, the official BIP-39
-  vectors, keystore permissions and re-encryption, network-mismatch refusal,
-  coin selection, dust handling, fresh change addresses, sweeping.
+  vectors, keystore permissions and re-encryption, network/HRP-mismatch
+  refusal, coin selection, dust handling, fresh change addresses, sweeping.
+* **Regressions** (`test_regressions.py`, `test_web_regressions.py`) — the
+  defects found in the 2026 mainnet-readiness pass, each pinned by a test:
+  multi-UTXO sends the node rejects, sweep nonce gaps, sub-fee sweep
+  transactions, multi-input signing, unbounded KDF/derivation indices, a
+  swallowed index-persist failure, an inverted FIPS 204 signing default, a
+  passphrase echoed over HTTP, a mainnet miner reachable through the web
+  bridge, and two HTTP/1.1 keep-alive desyncs.
 * **CLI** (`test_cli.py`) — every subcommand, plus the assertion that the web
   console's option list is read from the same parser.
 * **Web** (`test_web.py`) — every HTTP route, the CLI mirror, and the safety
@@ -387,11 +453,12 @@ python3 -m pytest tests/ -q
 * **Integration** (`test_integration.py`) — boots the real daemon, mines past
   maturity, settles transfers and exercises the RPC surface.
 
-Two developer checks drive real daemons over real sockets:
+Three developer checks drive real daemons over real sockets:
 
 ```bash
-python3 tools/web_smoke.py    # web suite: HTTP routes, CLI mirror, mine+send
-python3 tools/e2e_check.py    # two regtest daemons, P2P sync, send, reindex, auth
+python3 tools/web_smoke.py       # web suite: HTTP routes, CLI mirror, mine+send
+python3 tools/e2e_check.py       # two regtest daemons, P2P sync, send, reindex, auth
+python3 tools/wp_conformance.py  # every value the whitepaper pins, vs this build
 ```
 
 ---
@@ -415,12 +482,22 @@ python3 tools/e2e_check.py    # two regtest daemons, P2P sync, send, reindex, au
   thousands of 2 MB blocks at once.
 * **Mempool** — admission-time fee caching, per-address nonce chaining, an
   ancestor-depth limit, byte-budget eviction, expiry sweeping, and a reorg
-  resync.
+  resync. Lock ordering is strictly `mempool` → never `chain`, so an RPC
+  thread and the event loop cannot deadlock against each other.
 * **RPC** — loopback by default, optional Basic auth, batch support, spec
-  error semantics, and no signing or key storage on the node.
+  error semantics, a per-connection rate limit, a read-only GET surface,
+  same-origin CORS, and no signing or key storage on the node. Proof-of-work
+  search for `generate` runs in a worker thread so it cannot block the event
+  loop.
 * **Wallet** — AES-256-GCM with 600,000 PBKDF2-HMAC-SHA3-512 iterations
-  (configurable), 0600 permissions, atomic writes, network binding, and a
-  persisted next-address index so restarts never re-issue an address.
+  (configurable; 60,000 files still read), 0600 permissions, atomic
+  `mkstemp`+rename with a directory fsync, network **and** HRP binding, a
+  bounded KDF/derivation index, and a persisted next-address index whose
+  write failures are fatal rather than silent.
+* **HTTP surfaces** — no wildcard CORS, one response per request, bounded
+  bodies and query parameters, socket timeouts, and a per-subcommand command
+  allowlist that keeps key-material and database-rewriting verbs off the
+  web API.
 * **Shutdown** — SIGINT/SIGTERM and the RPC `stop` method all resolve to the
   same event; peer writers close before the server waits, so shutdown is
   prompt even with silent peers connected.
@@ -447,10 +524,19 @@ python3 tools/e2e_check.py    # two regtest daemons, P2P sync, send, reindex, au
 
 ## Security notes
 
-* ML-DSA-87 is FIPS 204 conformant; hedged signing is the default.
-* Wallets are sealed with AES-256-GCM + PBKDF2-HMAC-SHA3-512. A documented
-  SHA3-512 keystream fallback with encrypt-then-MAC exists for
-  cryptography-free environments and is clearly flagged in the file.
+* ML-DSA-87 is FIPS 204 conformant; hedged (randomised) signing is the
+  default at every layer, including the low-level `fips204.sign()`, whose
+  parameter default and documentation now agree. Deterministic signing is
+  opt-in.
+* Wallets are sealed with AES-256-GCM + PBKDF2-HMAC-SHA3-512, with a fresh
+  salt and GCM nonce on every write. A documented SHA3-512 keystream fallback
+  with encrypt-then-MAC exists for cryptography-free environments and is
+  clearly flagged in the file.
+* The wallet never builds a transaction the node would reject: one input per
+  address, contiguous sweep nonces, every sweep fee above the relay floor,
+  and `sign_transaction` restricted to single-input transactions (signing a
+  multi-input transaction with one key would overwrite the other inputs'
+  public keys).
 * The pure-Python FIPS 204 implementation is not constant-time; hardened
   deployments should rely on the OpenSSL backend (the same guidance FIPS 204
   gives for deterministic signing).
@@ -461,7 +547,13 @@ python3 tools/e2e_check.py    # two regtest daemons, P2P sync, send, reindex, au
   real mainnet hashrate needs a native SHA3-512 kernel.
 * `lock_time` is enforced (Bitcoin semantics: height-locked below
   500,000,000, median-time-past-locked at or above it).
-* Change outputs default to fresh derived addresses (whitepaper 6.1).
+* Change outputs default to fresh derived addresses (whitepaper 6.1), and the
+  change-address index is persisted *before* broadcast so an address that
+  reached the network is never re-issued.
+* Neither the JSON-RPC port nor the web suite sends a wildcard CORS grant,
+  and neither exposes a mutating method over `GET`. The web API additionally
+  refuses to arm a solo miner on mainnet and keeps key-material and
+  database-rewriting subcommands off HTTP entirely.
 
 ---
 

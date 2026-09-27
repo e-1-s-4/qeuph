@@ -155,6 +155,10 @@ class TestKeystore:
         assert keystore.load_wallet(p, None) == seed
         assert keystore.load_wallet(p, "") == seed
 
+    @pytest.mark.skipif(os.name == "nt",
+                       reason="Windows has no POSIX mode bits; os.chmod "
+                              "only toggles the read-only attribute, so the "
+                              "0600 guarantee is a POSIX-only property")
     def test_file_permissions(self, tmp_path):
         p = str(tmp_path / "w.json")
         keystore.save_wallet(p, os.urandom(32), "pw")
