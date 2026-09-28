@@ -53,7 +53,8 @@ class Daemon:
                  rpc_user: Optional[str] = None,
                  rpc_password: Optional[str] = None,
                  miner_threads: int = 1,
-                 max_peers: int = 64):
+                 max_peers: int = 64,
+                 p2p_host: str = "0.0.0.0"):
         self.network = network or get_network()
         self.chain = ChainManager(self.network)
         # the state provider keeps the pool correct across reorganisations,
@@ -67,7 +68,8 @@ class Daemon:
         self.node = QNode(self.network, self.chain, self.mempool,
                           connect_peers=peers,
                           seed_hosts=list(seed_hosts or []),
-                          max_peers=max_peers)
+                          max_peers=max_peers,
+                          bind_host=p2p_host)
         self.miner = SoloMiner(self.node, threads=miner_threads)
         self.rpc = RPCService(self.node, self.miner, rpc_host,
                               self.network.rpc_port,
@@ -127,8 +129,8 @@ class Daemon:
                     C.VERSION, self._crypto_backend(), self.network.name,
                     self.chain.height(), self.chain.tip_hash().hex()[:16])
         logger.info("genesis %s", self.chain.genesis.hash.hex())
-        logger.info("p2p %d | rpc %s (auth=%s) | data %s",
-                    self.network.p2p_port, self.rpc.url,
+        logger.info("p2p %s:%d | rpc %s (auth=%s) | data %s",
+                    self.node.bind_host, self.network.p2p_port, self.rpc.url,
                     "yes" if self.rpc.auth_required else "no",
                     self.network.data_dir)
         # signal handlers for graceful shutdown
@@ -189,7 +191,8 @@ def run_daemon(network_name=None, mine_to: Optional[str] = None,
                rpc_password: Optional[str] = None,
                miner_threads: int = 1,
                verbose: bool = False,
-               logfile: Optional[str] = None):
+               logfile: Optional[str] = None,
+               p2p_host: str = "0.0.0.0"):
     setup_logging(verbose, logfile)
     # accept either a network name or a pre-configured Network object
     # (the CLI overrides ports/data_dir on the object before starting)
@@ -203,7 +206,7 @@ def run_daemon(network_name=None, mine_to: Optional[str] = None,
                        "full node control (mining, submission, stop)", rpc_host)
     d = Daemon(net, mine_to=mine_to, connect_peers=peers, rpc_host=rpc_host,
                seed_hosts=seeds, rpc_user=rpc_user, rpc_password=rpc_password,
-               miner_threads=miner_threads)
+               miner_threads=miner_threads, p2p_host=p2p_host)
     try:
         asyncio.run(d.run())
     except KeyboardInterrupt:

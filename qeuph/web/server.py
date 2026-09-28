@@ -75,18 +75,20 @@ logger = logging.getLogger("qeuph.web")
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))       # .../qeuph/web
 _REPO_ROOT = os.path.dirname(os.path.dirname(_PKG_DIR))     # <repo>
-# the UI ships inside the package, so it works from an installed wheel and
-# from a source checkout alike
+# The UI ships inside the package, so it works from an installed wheel and
+# from a source checkout alike.  ONLY the package directory is trusted: a
+# repo-root entry made `<repo>/index.html` (a duplicate kept for GitHub
+# Pages) shadow the real asset, and a legacy `<repo>/web` entry pointed at a
+# directory that no longer exists.  Neither belongs on the lookup path of a
+# server that serves from a trusted loopback origin.
 STATIC_DIRS = [
-    _REPO_ROOT,
     os.path.join(_PKG_DIR, "static"),
-    os.path.join(_REPO_ROOT, "web"),          # legacy top-level web/ directory
 ]
 # Deliberately NOT os.getcwd(): serve_static allowlists by filename, so a
 # cwd containing an index.html would serve it from the trusted loopback
 # origin - and a wallet written to that path by another route would then be
 # reachable at the site root.
-STATIC_FILES = ("index.html", "app.js", "style.css", "favicon.svg")
+STATIC_FILES = ("index.html", "style.css", "favicon.svg")
 
 
 # ---------------------------------------------------------------------------
@@ -103,18 +105,29 @@ class NodeManager:
 
     def __init__(self, network_name: str = "regtest",
                  data_root: Optional[str] = None, start_node: bool = True,
-                 port_offset: int = 0):
+                 port_offset: int = 0,
+                 connect_peers: Optional[list] = None,
+                 p2p_host: str = "127.0.0.1"):
         self.lock = threading.RLock()
         self.port_offset = port_offset
         self.data_root = data_root or os.path.join(
             os.environ.get("TMPDIR", "/tmp"), "qeuph-web")
-        self.network_name = network_name
+        self.network_name = network_name.name \
+            if isinstance(network_name, Network) else network_name
+        # P2P peers the embedded node dials at startup (HOST:PORT strings,
+        # same syntax as `qeuph node --connect`).  With a non-empty list the
+        # embedded node is a FIRST-CLASS mesh participant: CLI daemons can
+        # dial it and it dials them, so blocks and transactions flow between
+        # the browser's node and terminal-run nodes in both directions.
+        self.connect_peers = list(connect_peers or [])
+        self.p2p_host = p2p_host
         self.chain: Optional[ChainManager] = None
         self.mempool: Optional[Mempool] = None
         self.node: Optional[QNode] = None
         self.miner: Optional[SoloMiner] = None
         self.rpc: Optional[RPCService] = None
-        self.network: Network = get_network(network_name)
+        self.network: Network = network_name \
+            if isinstance(network_name, Network) else get_network(network_name)
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
         self._stop_evt: Optional[asyncio.Event] = None
@@ -131,32 +144,47 @@ class NodeManager:
         os.makedirs(d, exist_ok=True)
         return d
 
-    def network_for(self, network_name: str) -> Network:
-        base = get_network(network_name)
+    def network_for(self, network_name) -> Network:
+        base = (network_name if isinstance(network_name, Network)
+                else get_network(network_name))
         # UI ports are derived from the profile so two web servers can run
         # side by side on one host; port_offset lets a caller move them again.
         offset = self.port_offset + {
-            "mainnet": 0, "testnet": 1000, "regtest": 2000}[network_name]
+            "mainnet": 0, "testnet": 1000, "regtest": 2000}[base.name]
         return dataclasses.replace(
             base,
-            data_dir=self.data_dir(network_name),
+            data_dir=self.data_dir(base.name),
             p2p_port=base.p2p_port + offset,
             rpc_port=base.rpc_port + offset,
         )
 
     # ------------------------------------------------------------------
-    def open(self, network_name: str):
-        """(Re)open the embedded node on `network_name`, stopping the old one."""
+    def open(self, network_name):
+        """(Re)open the embedded node on `network_name`, stopping the old one.
+
+        Accepts a profile NAME ("regtest") or a Network object (callers that
+        pre-customise ports, as the clash tests do).
+        """
         with self.lock:
             self.close()
-            self.network_name = network_name
+            if isinstance(network_name, Network):
+                name = network_name.name
+            else:
+                name = network_name
+            self.network_name = name
             self.network = self.network_for(network_name)
             self.chain = ChainManager(self.network)
             self.mempool = Mempool(self.chain.state_provider(),
                                    fee_rate=C.MIN_RELAY_FEE_RATE,
                                    height_fn=self.chain.height,
                                    mtp_fn=self.chain.median_time_past)
-            self.node = QNode(self.network, self.chain, self.mempool)
+            # strict_listen=False: a P2P port clash degrades the embedded
+            # node to outbound-only dialing instead of killing the UI.
+            self.node = QNode(self.network, self.chain, self.mempool,
+                              connect_peers=[_parse_peer(p, self.network.p2p_port)
+                                             for p in self.connect_peers],
+                              bind_host=self.p2p_host,
+                              strict_listen=False)
             self.miner = SoloMiner(self.node)
             self._stop_evt = asyncio.Event()
             self._ensure_loop()
@@ -171,10 +199,19 @@ class NodeManager:
             self.rpc.start_background(self._loop)
             if self.rpc.port != self.network.rpc_port:
                 self.network = dataclasses.replace(self.network, rpc_port=self.rpc.port)
+            # The P2P service must actually RUN.  Without start() the node
+            # listened on no port and dialled nobody, so the browser's node
+            # could never join a mesh of CLI daemons or sync a real chain.
+            try:
+                self.submit_coro(self.node.start(), timeout=30.0)
+            except Exception as e:
+                logger.warning("embedded node p2p start failed: %s", e)
             self.started_node = True
             logger.info("embedded node opened on %s at height %d "
-                        "(rpc %s)", network_name, self.chain.height(),
-                        self.rpc.url)
+                        "(rpc %s, p2p %s:%d, peers wanted: %s)",
+                        network_name, self.chain.height(), self.rpc.url,
+                        self.p2p_host, self.network.p2p_port,
+                        self.connect_peers or "none")
             return self.status()
 
     def _ensure_loop(self):
@@ -263,6 +300,11 @@ class NodeManager:
                 "mempool_bytes": self.mempool.total_size(),
                 "utxos": len(self.chain.state.utxos),
                 "peers": len(self.node.peers),
+                "p2p_port": self.network.p2p_port,
+                "p2p_listening": self.node.server is not None,
+                "p2p_listen_failed": self.node.listen_failed,
+                "p2p_connect": self.connect_peers,
+                "p2p_host": self.node.bind_host,
                 "synced": self.node.synced,
                 "orphans": self.chain.orphan_count(),
                 "reorgs": self.chain.reorg_count,
@@ -402,6 +444,12 @@ _CLI_LOCK = threading.Lock()
 NODE: Optional[NodeManager] = None
 CLI_TREE: Optional[dict] = None
 ALLOW_REMOTE = False
+# Remote-attach mode (`--embedded-node off --remote-rpc URL`): every chain
+# view is served from an EXTERNAL node's JSON-RPC endpoint instead of an
+# embedded chain, so the browser becomes a thin explorer/wallet for a
+# CLI-run daemon.  The wallet file stays local; signing stays in this
+# process; the remote node never sees key material, only signed txs.
+REMOTE_RPC: Optional[str] = None
 
 # Bounds for caller-supplied list sizes.  These views do real work per item
 # (a PBKDF2 unlock plus an ML-DSA-87 keygen per derived address), so an
@@ -412,6 +460,49 @@ MAX_BLOCK_LIMIT = 50
 # cannot be used to bypass it.
 MAX_WEB_BATCH = 32
 MAX_BODY_BYTES = 8 * 1024 * 1024
+
+
+def _parse_peer(spec: str, default_port: int = 0) -> tuple:
+    """HOST:PORT -> (host, port); same syntax as `qeuph node --connect`."""
+    from qeuph.main import parse_peer
+    return parse_peer(str(spec), default_port)
+
+
+def remote_call(method: str, params: Optional[dict] = None,
+                timeout: float = 30.0):
+    """One JSON-RPC call to the remote node (remote-attach mode).
+
+    Raises HttpError(502) when the upstream node is unreachable so the
+    browser sees a clean message instead of a stack trace.
+    """
+    if not REMOTE_RPC:
+        raise HttpError("remote mode is not active", 500)
+    import urllib.error
+    from qeuph.wallet.wallet import rpc_call as _rpc_call
+    try:
+        return _rpc_call(REMOTE_RPC, method, params or {}, timeout=timeout)
+    except Exception as e:
+        raise HttpError(f"remote node {REMOTE_RPC} unreachable: {e}", 502)
+
+
+def remote_raw(body: dict) -> dict:
+    """Forward a raw JSON-RPC document (or batch) to the remote node."""
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(
+        REMOTE_RPC, data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode())
+        except Exception:
+            detail = {"error": f"HTTP {e.code}"}
+        return detail
+    except Exception as e:
+        raise HttpError(f"remote node {REMOTE_RPC} unreachable: {e}", 502)
 
 
 class QeuphHttpHandler(BaseHTTPRequestHandler):
@@ -513,12 +604,10 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
                 return self.serve_static("index.html")
             if path in ("/favicon.ico", "/favicon.svg"):
                 return self.serve_static("favicon.svg", "image/svg+xml")
-            if path == "/app.js":
-                return self.serve_static("app.js", "application/javascript")
             if path == "/style.css":
                 return self.serve_static("style.css", "text/css")
             if path == "/api/status":
-                return self.send_json(NODE.status())
+                return self.send_json(self.status_view())
             if path == "/api/blocks":
                 limit = self._int_param(parsed, "limit", 15, 1, MAX_BLOCK_LIMIT)
                 return self.send_json(self.blocks(limit))
@@ -527,6 +616,8 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             if path in ("/api/wallet/info", "/api/wallet/summary"):
                 return self.send_json(self.wallet_ui_info())
             if path == "/api/peers":
+                if REMOTE_RPC:
+                    return self.send_json({"peers": remote_call("getpeerinfo")})
                 return self.send_json({"peers": NODE.node.peer_info()
                                        if NODE.node else []})
             if path == "/api/emission":
@@ -536,6 +627,8 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             if path == "/api/wallet/addresses":
                 count = self._int_param(parsed, "count", 5, 1,
                                         MAX_ADDRESS_COUNT)
+                if REMOTE_RPC:
+                    return self.send_json(self._remote_address_report(count))
                 return self.send_json(NODE.address_report(count))
             if path == "/api/cli":
                 return self.send_json(cli_tree())
@@ -563,7 +656,17 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             return self.send_error_json(e.message, e.code)
         try:
             if path == "/api/rpc":
+                if REMOTE_RPC:
+                    return self.send_json(self.rpc_bridge_remote(data))
                 return self.send_json(self.rpc_bridge(data))
+            if REMOTE_RPC and path.startswith("/api/miner/"):
+                raise HttpError(
+                    "this UI is attached to a remote node and has no miner",
+                    403)
+            if REMOTE_RPC and path == "/api/generate":
+                raise HttpError(
+                    "this UI is attached to a remote node; generate there via "
+                    "its own JSON-RPC (testnet/regtest only)", 403)
             if path == "/api/cli":
                 return self.send_json(self.run_cli(data, wallet=False))
             if path == "/api/wallet":
@@ -604,12 +707,17 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             if path == "/api/miner/toggle":
                 return self.send_json(self.miner_ui_toggle(data))
             if path == "/api/wallet/generate":
-                return self.send_json(self.wallet_ui_generate())
+                return self.send_json(self.wallet_ui_generate(data))
             if path == "/api/wallet/restore":
                 return self.send_json(self.wallet_ui_restore(data))
             if path == "/api/wallet/send":
                 return self.send_json(self.wallet_ui_send(data))
             if path in ("/api/network", "/api/network/switch"):
+                if REMOTE_RPC:
+                    raise HttpError(
+                        "network switching is disabled while attached to a "
+                        "remote node; restart this UI with --network / "
+                        "--remote-rpc pointing at the target", 400)
                 name = str(data.get("network", "regtest"))
                 if name not in ("mainnet", "testnet", "regtest"):
                     raise HttpError(f"unknown network {name}")
@@ -653,8 +761,15 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
                                     f"{', '.join(STATIC_DIRS)})", 404)
 
     # -- data views -----------------------------------------------------
+    def status_view(self) -> dict:
+        if REMOTE_RPC:
+            return self._remote_status()
+        return NODE.status()
+
     def blocks(self, limit: int) -> dict:
         limit = max(1, min(50, limit))
+        if REMOTE_RPC:
+            return self._remote_blocks(limit)
         chain = NODE.chain
         out = []
         with chain.lock:
@@ -667,6 +782,9 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
         return {"blocks": out, "total_height": chain.height()}
 
     def one_block(self, target: str) -> dict:
+        if REMOTE_RPC:
+            arg = int(target) if target.isdigit() else target
+            return remote_call("getblock", {"hash": arg})
         b = None
         if target.isdigit():
             b = NODE.chain.get_block_by_height(int(target))
@@ -683,6 +801,18 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
         return d
 
     def mempool_info(self) -> dict:
+        if REMOTE_RPC:
+            # getrawmempool(verbose) returns full tx dicts keyed by txid;
+            # normalise it to the same shape the embedded mempool view has,
+            # so the dashboard renders one structure in both modes.
+            verbose = remote_call("getrawmempool", {"verbose": True})
+            txs = list(verbose.values()) if isinstance(verbose, dict) else []
+            mp = remote_call("getmempoolinfo")
+            return {"count": mp.get("count", len(txs)),
+                    "bytes": mp.get("bytes", 0),
+                    "maxbytes": C.MAX_MEMPOOL_SIZE,
+                    "relayfee": C.MIN_RELAY_FEE_RATE,
+                    "transactions": txs}
         mp = NODE.mempool
         with mp.lock:
             txs = [t.to_dict(NODE.network.hrp) for t in mp.all_txs()]
@@ -695,6 +825,8 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             txid = bytes.fromhex(txid_hex)
         except ValueError:
             return {"error": "invalid txid", "ok": False}
+        if REMOTE_RPC:
+            return remote_call("gettransaction", {"txid": txid.hex()})
         tx = NODE.mempool.get_tx(txid)
         if tx is not None:
             d = tx.to_dict(NODE.network.hrp)
@@ -717,6 +849,8 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
         ahash = addr_mod.address_to_hash(addr, hrp)
         if ahash is None or len(ahash) != C.ADDRESS_HASH_SIZE:
             return {"error": f"invalid {hrp} address", "ok": False}
+        if REMOTE_RPC:
+            return remote_call("getaddressinfo", {"address": addr})
         from qeuph.core.state import confirmations, is_mature
         with NODE.chain.lock:
             h = NODE.chain.height()
@@ -738,6 +872,52 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
                 "confirmations": confirmations(u, h),
             } for t, i, u in rows[:100]],
         }
+
+    # -- remote-attach views --------------------------------------------
+    def _remote_status(self) -> dict:
+        """Dashboard status assembled from the remote node's JSON-RPC."""
+        info = remote_call("getblockchaininfo")
+        netinfo = remote_call("getnetworkinfo")
+        mp = remote_call("getmempoolinfo")
+        st = {
+            "network": info.get("chain", NODE.network_name),
+            "hrp": netinfo.get("hrp", NODE.network.hrp),
+            "node": f"remote:{REMOTE_RPC}",
+            "mode": "remote",
+            "height": info.get("height", info.get("blocks", 0)),
+            "best_hash": info.get("bestblockhash", ""),
+            "difficulty": info.get("difficulty"),
+            "bits": info.get("bits"),
+            "chainwork": info.get("chainwork"),
+            "mediantime": info.get("mediantime"),
+            "mempool_count": mp.get("count", 0),
+            "mempool_bytes": mp.get("bytes", 0),
+            "peers": netinfo.get("connections", 0),
+            "mining_allowed": False,
+            "backend": ml_dsa.backend_name(),
+            "version": netinfo.get("version", C.VERSION),
+            "uptime": int(time.time() - NODE.start_time),
+            "wallet": NODE.wallet_info(),
+            "remote_rpc": REMOTE_RPC,
+        }
+        st["wallet_balance_quh"] = 0.0
+        st["wallet_matured_quh"] = 0.0
+        st["wallet_nonce"] = 0
+        st["wallet_address"] = None
+        return st
+
+    def _remote_blocks(self, limit: int) -> dict:
+        """Recent blocks via the remote node, newest first."""
+        info = remote_call("getblockchaininfo")
+        tip = int(info.get("height", info.get("blocks", 0)))
+        out = []
+        for h in range(tip, max(-1, tip - limit), -1):
+            try:
+                b = remote_call("getblock", {"height": h})
+            except HttpError:
+                continue
+            out.append(b)
+        return {"blocks": out, "total_height": tip}
 
     def emission(self) -> dict:
         from qeuph.core import reward as reward_mod
@@ -804,100 +984,207 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
         }
 
     def wallet_ui_info(self) -> dict:
-        path = NODE.wallet_path()
-        if not os.path.exists(path):
-            if not NODE.network.is_mainnet:
-                try:
-                    from qeuph.wallet import Wallet
-                    w = Wallet.create(hrp=NODE.network.hrp, network=NODE.network.name)
-                    w.save(path, "")
-                    ahash = addr_mod.address_to_hash(w.address_at(0), NODE.network.hrp)
-                    if ahash and not NODE.miner.payout_address:
-                        NODE.miner.set_payout(ahash)
-                except Exception:
-                    pass
-        rep = NODE.address_report(count=5)
-        mnemonic = "Sealed in encrypted keystore. Use `qeuph wallet mnemonic` in terminal."
-        if os.path.exists(path):
-            try:
-                doc = keystore.load_wallet_doc(path)
-                if "aes" not in doc:
-                    seed = keystore.load_wallet(path, "")
-                    from qeuph.wallet.mnemonic import mnemonic_from_seed
-                    mnemonic = mnemonic_from_seed(seed)
-            except Exception:
-                pass
+        """Wallet status for the dashboard.  READ-ONLY by design.
+
+        Two regressions are pinned here: this route used to CREATE an
+        unencrypted wallet (and arm the miner payout) as a side effect of a
+        GET, and for an unencrypted wallet it returned the actual recovery
+        phrase over HTTP.  Neither is acceptable: a poll of the dashboard
+        must never create key material, and the phrase never leaves the
+        process - `qeuph wallet mnemonic` in a terminal is the only way out.
+        """
+        rep = NODE.address_report(count=5) if not REMOTE_RPC else None
+        if REMOTE_RPC:
+            # remote mode: addresses are still derived locally (public data);
+            # balances come from the remote node
+            rep = self._remote_address_report(5)
         return {
-            "exists": rep.get("exists", os.path.exists(path)),
-            "mnemonic": mnemonic,
-            "addresses": rep.get("addresses", []),
+            "exists": rep.get("exists", False) if rep else False,
+            "path": NODE.wallet_path(),
+            "mnemonic": "Sealed in encrypted keystore. Use `qeuph wallet "
+                        "mnemonic` in a terminal.",
+            "addresses": (rep or {}).get("addresses", []),
             "network": NODE.network.name,
             "hrp": NODE.network.hrp,
+            "mode": "remote" if REMOTE_RPC else "embedded",
         }
 
-    def wallet_ui_generate(self) -> dict:
+    def _remote_address_report(self, count: int) -> dict:
+        """Address report with balances fetched from the remote node."""
+        path = NODE.wallet_path()
+        if not os.path.exists(path):
+            return {"exists": False, "path": path, "addresses": []}
+        rows = []
+        for i in range(count):
+            try:
+                addr = derive_address_from_wallet(
+                    path, i, passphrase=None, hrp=NODE.network.hrp)
+            except Exception:
+                addr = None
+            if addr is None:
+                break
+            try:
+                bal = remote_call("getbalance", {"address": addr})
+                rows.append({
+                    "index": i, "address": addr,
+                    "balance_quphi": bal.get("balance", 0),
+                    "balance_quh": bal.get("balance_quh", 0.0),
+                    "matured_quphi": bal.get("matured_balance", 0),
+                    "matured_quh": bal.get("matured_balance_quh", 0.0),
+                    "nonce": remote_call("getnonce",
+                                         {"address": addr}).get("nonce", 0),
+                })
+            except HttpError:
+                rows.append({"index": i, "address": addr,
+                             "balance_quphi": 0, "balance_quh": 0.0,
+                             "matured_quphi": 0, "matured_quh": 0.0,
+                             "nonce": 0})
+        return {"exists": True, "path": path, "addresses": rows}
+
+    def wallet_ui_generate(self, data: dict) -> dict:
+        """Create a wallet from the UI.
+
+        The passphrase comes from the request body and seals the keystore.
+        The response NEVER contains the recovery phrase - showing it in a
+        browser would put it in devtools, proxy logs and any response cache.
+        The UI directs the operator to `qeuph wallet mnemonic` on the
+        terminal for the one-time backup.
+        """
         from qeuph.wallet import Wallet
-        from qeuph.wallet.mnemonic import mnemonic_from_seed
+        passphrase = data.get("passphrase")
+        if passphrase is None or str(passphrase) == "":
+            raise HttpError(
+                "a passphrase is required to seal the wallet; the UI does "
+                "not create unencrypted wallets", 400)
         w = Wallet.create(hrp=NODE.network.hrp, network=NODE.network.name)
-        w.save(NODE.wallet_path(), "")
+        w.save(NODE.wallet_path(), str(passphrase))
         payout = w.address_at(0)
         ahash = addr_mod.address_to_hash(payout, NODE.network.hrp)
-        if ahash:
+        if ahash and not NODE.network.is_mainnet:
             NODE.miner.set_payout(ahash)
-        mn = mnemonic_from_seed(w.master_seed)
-        return {"success": True, "mnemonic": mn, "address": payout}
+        return {"success": True, "address": payout,
+                "encrypted": True,
+                "mnemonic": "Sealed in encrypted keystore. Use `qeuph wallet "
+                            "mnemonic` in a terminal to back it up once."}
 
     def wallet_ui_restore(self, data: dict) -> dict:
+        """Rebuild a wallet from a recovery phrase typed into the UI.
+
+        The phrase is necessarily IN the request (that is what restore
+        means); it is never echoed back, never written to disk unsealed, and
+        the keystore is created sealed under the supplied passphrase.
+        """
         from qeuph.wallet import Wallet
         phrase = str(data.get("mnemonic", "")).strip()
+        passphrase = data.get("passphrase")
+        if not phrase:
+            return {"success": False, "error": "mnemonic required"}
+        if passphrase is None or str(passphrase) == "":
+            raise HttpError(
+                "a passphrase is required to seal the restored wallet", 400)
         try:
-            w = Wallet.from_mnemonic(phrase, hrp=NODE.network.hrp, network=NODE.network.name)
-            w.save(NODE.wallet_path(), "")
+            w = Wallet.from_mnemonic(phrase, hrp=NODE.network.hrp,
+                                     network=NODE.network.name)
+            w.save(NODE.wallet_path(), str(passphrase))
             payout = w.address_at(0)
             ahash = addr_mod.address_to_hash(payout, NODE.network.hrp)
-            if ahash:
+            if ahash and not NODE.network.is_mainnet:
                 NODE.miner.set_payout(ahash)
             return {"success": True, "address": payout}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     def wallet_ui_send(self, data: dict) -> dict:
+        """Sign in-process and broadcast from the dashboard's Send form.
+
+        The 2026 in-tree version called `Wallet.send` with a signature that
+        no longer existed (instant TypeError) and then methods the node
+        never had (`mempool.accept`, `node.broadcast_tx`), so the dashboard's
+        Send button failed on every click.  The repaired path is the same
+        one the CLI uses: `build_transaction` (matured UTXOs, txnonce,
+        ML-DSA-87 sign) followed by a real broadcast - `node.submit_tx` on
+        the embedded node's event loop, or `sendrawtransaction` to the
+        remote node in remote-attach mode.
+        """
+        from decimal import Decimal, InvalidOperation
         from qeuph.wallet import Wallet
         to_addr = str(data.get("to", "")).strip()
-        amt_quh = float(data.get("amount", 0) or 0)
-        fee_quh = float(data.get("fee", 0.01) or 0.01)
         from_idx = int(data.get("from_index", 0) or 0)
-        path = NODE.wallet_path()
-        if not os.path.exists(path):
-            return {"success": False, "error": "Wallet file does not exist on disk"}
+        passphrase = data.get("passphrase")
+        raw_amount = data.get("amount")
+        raw_fee = data.get("fee")
+        if not to_addr:
+            return {"success": False, "error": "recipient address required"}
+        if raw_amount in (None, ""):
+            return {"success": False, "error": "amount required"}
+        # Exact decimal conversion: float math (round(10.13 * 1e8)) loses
+        # quphi; the CLI's Decimal rule applies here too.
         try:
-            w = Wallet.open(path, passphrase="", hrp=NODE.network.hrp, network=NODE.network.name)
-        except Exception as e:
-            return {"success": False, "error": f"Failed to unlock wallet: {e}"}
-        
-        amt_quphi = round(amt_quh * C.QUPHI_PER_QUH)
-        fee_quphi = round(fee_quh * C.QUPHI_PER_QUH)
+            amt_quphi = int(Decimal(str(raw_amount)) * C.QUPHI_PER_QUH)
+        except (InvalidOperation, ValueError):
+            return {"success": False, "error": f"bad amount {raw_amount!r}"}
+        try:
+            fee_quphi = (int(Decimal(str(raw_fee)) * C.QUPHI_PER_QUH)
+                         if raw_fee not in (None, "") else 1_000_000)
+        except (InvalidOperation, ValueError):
+            return {"success": False, "error": f"bad fee {raw_fee!r}"}
         if amt_quphi <= 0:
             return {"success": False, "error": "Amount must be positive"}
         if fee_quphi < C.MIN_RELAY_FEE_RATE:
             fee_quphi = C.MIN_RELAY_FEE_RATE
+        path = NODE.wallet_path()
+        if not os.path.exists(path):
+            return {"success": False,
+                    "error": "no wallet on this host; create one first "
+                             "(Wallet tab -> Create)"}
+        # The keystore decides: an "unencrypted" wallet (created via the
+        # CLI's --unencrypted flag) is sealed under the EMPTY passphrase and
+        # opens with it, while an encrypted one fails authentication here -
+        # so the request either unlocks or reports a clean failure.  (A doc
+        # shape check cannot tell the two apart: --unencrypted still writes
+        # an "aes" field, just keyed under passphrase "".)
         try:
-            with NODE.chain.lock:
-                tx = w.send(to_addr, amt_quphi, fee_quphi, from_index=from_idx,
-                            state=NODE.chain.state, height=NODE.chain.height(),
-                            mtp=NODE.chain.median_time_past())
-            NODE.mempool.accept(tx)
-            if NODE.node:
-                NODE.node.broadcast_tx(tx)
-            return {
-                "success": True,
-                "txid": tx.txid().hex(),
-                "size_bytes": len(tx.serialize()),
-                "inputs_count": len(tx.inputs),
-                "nonce": tx.inputs[0].txnonce,
-            }
+            w = Wallet.open(path, passphrase=str(passphrase or ""),
+                            hrp=NODE.network.hrp,
+                            network=NODE.network.name)
+        except keystore.WalletError:
+            return {"success": False,
+                    "error": "wallet unlock failed: wrong or missing "
+                             "passphrase (the UI never holds keys between "
+                             "requests)"}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to unlock wallet: {e}"}
+        rpc_url = REMOTE_RPC or (NODE.rpc.url if NODE.rpc else None)
+        try:
+            tx = w.build_transaction(
+                from_idx, [(to_addr, amt_quphi)], fee=fee_quphi,
+                rpc_url=rpc_url)
         except Exception as e:
             return {"success": False, "error": str(e)}
+        # broadcast
+        try:
+            if REMOTE_RPC:
+                from qeuph.wallet.wallet import rpc_call
+                res = rpc_call(REMOTE_RPC, "sendrawtransaction",
+                               {"tx_hex": tx.serialize().hex()})
+                if not res.get("accepted"):
+                    return {"success": False,
+                            "error": f"node rejected transaction: "
+                                     f"{res.get('reason')}"}
+            else:
+                accepted, reason = NODE.submit_coro(
+                    NODE.node.submit_tx(tx), timeout=60.0)
+                if not accepted:
+                    return {"success": False, "error": reason}
+        except Exception as e:
+            return {"success": False, "error": f"broadcast failed: {e}"}
+        return {
+            "success": True,
+            "txid": tx.txid().hex(),
+            "size_bytes": tx.size(),
+            "inputs_count": len(tx.inputs),
+            "nonce": tx.inputs[0].txnonce,
+        }
 
     def miner_ui_toggle(self, data: dict) -> dict:
         if NODE.network.is_mainnet:
@@ -938,6 +1225,24 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
                         "error": f"batch larger than {MAX_WEB_BATCH}"}
             return {"ok": True, "batch": [self._rpc_one(r) for r in batch]}
         return self._rpc_one(data)
+
+    def rpc_bridge_remote(self, data: dict) -> dict:
+        """Forward the RPC console's call(s) to the attached remote node."""
+        if isinstance(data.get("batch"), list):
+            batch = data["batch"]
+            if len(batch) > MAX_WEB_BATCH:
+                return {"ok": False,
+                        "error": f"batch larger than {MAX_WEB_BATCH}"}
+            return {"ok": True, "batch": remote_raw(batch)}
+        req = {k: data[k] for k in ("method", "params", "id")
+               if k in data} or data
+        doc = remote_raw(req)
+        # unwrap the single JSON-RPC envelope for the console UI
+        if isinstance(doc, dict) and doc.get("error") is not None:
+            return {"ok": False, "error": doc["error"]}
+        if isinstance(doc, dict) and "result" in doc:
+            return {"ok": True, "result": doc["result"]}
+        return {"ok": True, "result": doc}
 
     def _rpc_one(self, req: dict) -> dict:
         method = str(req.get("method", ""))
@@ -1012,6 +1317,13 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
         if not argv or argv[0] not in allowed:
             return {"ok": False, "args": redact_argv(argv),
                     "error": f"only {sorted(allowed)} may be run here"}
+        if REMOTE_RPC and argv[0] == "chain":
+            # chain * reads the LOCAL database, which is empty in remote
+            # mode - reporting it would be lying about the attached node.
+            return {"ok": False, "args": redact_argv(argv),
+                    "error": "chain commands read the local database, but "
+                             "this UI is attached to a remote node; query "
+                             "the remote node's own CLI or RPC console"}
         if wallet and _exports_secret(argv):
             return {"ok": False, "args": redact_argv(argv),
                     "error": "the recovery phrase and the master seed are "
@@ -1066,9 +1378,13 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
                             "data directory", 403)
                 else:
                     argv += ["--path", NODE.wallet_path()]
-            if "--rpc" in opts and not _has_flag(argv, "--rpc") \
-                    and NODE.rpc is not None:
-                argv += ["--rpc", NODE.rpc.url]
+            if "--rpc" in opts and not _has_flag(argv, "--rpc"):
+                # remote mode points the wallet at the ATTACHED node; the
+                # embedded node's own listener is used otherwise
+                if REMOTE_RPC:
+                    argv += ["--rpc", REMOTE_RPC]
+                elif NODE.rpc is not None:
+                    argv += ["--rpc", NODE.rpc.url]
         # One CLI run at a time: redirect_stdout/stderr mutate process-global
         # state, and the embedded node keeps logging from the event loop.
         with _CLI_LOCK:
@@ -1327,28 +1643,46 @@ def cli_tree() -> dict:
 def serve(host: str = C.DEFAULT_WEB_HOST, port: int = C.DEFAULT_WEB_PORT,
           network: str = "regtest", embedded: Optional[str] = None,
           data_root: Optional[str] = None, allow_remote: bool = False,
-          start_node: bool = True, port_offset: int = 0):
+          start_node: bool = True, port_offset: int = 0,
+          connect_peers: Optional[list] = None,
+          p2p_host: str = "127.0.0.1",
+          remote_rpc: Optional[str] = None):
     """Start the web suite.  Returns the ThreadingHTTPServer."""
-    global NODE, ALLOW_REMOTE
+    global NODE, ALLOW_REMOTE, REMOTE_RPC
     ALLOW_REMOTE = allow_remote
     if embedded is not None:
-        network = "regtest" if embedded == "off" else embedded
         start_node = embedded != "off"
+    # The bind check comes FIRST: refusing a dangerous interface must not
+    # depend on how the rest of the suite is configured.
     if not allow_remote and not _is_loopback(host):
         raise SystemExit(
             f"refusing to bind {host}: the web suite exposes full node "
             f"control. Use --host 127.0.0.1, or pass --allow-remote if you "
             f"have a firewall and understand the risk.")
+    if embedded == "off":
+        if not remote_rpc:
+            raise SystemExit("--embedded-node off requires --remote-rpc URL")
+        REMOTE_RPC = remote_rpc
+        network = "regtest" if network is None else network
+    elif remote_rpc:
+        raise SystemExit("--remote-rpc only applies with --embedded-node off")
     NODE = NodeManager(network, data_root=data_root, start_node=start_node,
-                       port_offset=port_offset)
+                       port_offset=port_offset, connect_peers=connect_peers,
+                       p2p_host=p2p_host)
     httpd = ThreadingHTTPServer((host, port), QeuphHttpHandler)
     httpd.daemon_threads = True
     bar = "=" * 64
     print(bar)
     print(" Qeuph (QUH) node suite")
     print(f" explorer + wallet UI : http://{host}:{port}/")
-    print(f" network             : {network}"
-          + ("" if start_node else " (read-only, no embedded node)"))
+    if REMOTE_RPC:
+        print(f" mode                : remote attach -> {REMOTE_RPC}")
+    else:
+        print(f" network             : {network}"
+              + ("" if start_node else " (no embedded node)"))
+        print(f" embedded p2p        : {p2p_host}:{NODE.network.p2p_port}"
+              + (f" (dialing {', '.join(connect_peers)})"
+                 if connect_peers else ""))
     print(f" ML-DSA-87           : {ml_dsa.backend_name()} backend")
     print(" PoW                 : double SHA3-512, 300 s blocks")
     print(bar)
@@ -1374,6 +1708,13 @@ def main(argv=None):
                    choices=["mainnet", "testnet", "regtest"])
     p.add_argument("--embedded-node", default=None,
                    choices=["regtest", "testnet", "mainnet", "off"])
+    p.add_argument("--remote-rpc", default=None,
+                   help="with --embedded-node off: JSON-RPC URL of the "
+                        "external node this UI attaches to")
+    p.add_argument("--connect", action="append", metavar="HOST:PORT",
+                   help="P2P peer the embedded node dials (repeatable)")
+    p.add_argument("--p2p-host", default="127.0.0.1",
+                   help="interface the embedded node's P2P listener binds")
     p.add_argument("--data-root", default=None,
                    help="where the embedded node keeps its chain.db")
     p.add_argument("--allow-remote", action="store_true",
@@ -1388,7 +1729,9 @@ def main(argv=None):
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     serve(host=args.host, port=args.port, network=args.network,
           embedded=args.embedded_node, data_root=args.data_root,
-          allow_remote=args.allow_remote, port_offset=args.port_offset)
+          allow_remote=args.allow_remote, port_offset=args.port_offset,
+          connect_peers=args.connect, p2p_host=args.p2p_host,
+          remote_rpc=args.remote_rpc)
 
 
 if __name__ == "__main__":

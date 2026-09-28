@@ -438,13 +438,6 @@ class Wallet:
             raise WalletError(f"node rejected transaction: {res.get('reason')}")
         return tx.txid().hex()
 
-    def send(self, sender_index: int, recipients, fee, rpc_url,
-             fresh_change: bool = True, lock_time: int = 0) -> str:
-        tx = self.build_transaction(sender_index, recipients, fee=fee,
-                                     rpc_url=rpc_url, fresh_change=fresh_change,
-                                     lock_time=lock_time)
-        return self.send_transaction(tx, rpc_url)
-
     # ------------------------------------------------------------------
     def info(self, count: int = 5) -> dict:
         return {

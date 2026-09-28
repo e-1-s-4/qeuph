@@ -134,10 +134,49 @@ All three start the same server. Options:
 | `--host` | bind address (default `127.0.0.1`) |
 | `--port` | HTTP port (default `3000`) |
 | `--network` | `regtest` \| `testnet` \| `mainnet` for the embedded node |
-| `--embedded-node` | force a network, or `off` for a read-only view of an external node |
+| `--embedded-node` | force a network, or `off` to ATTACH the UI to `--remote-rpc` |
+| `--remote-rpc URL` | with `--embedded-node off`: the external node's JSON-RPC endpoint |
+| `--connect HOST:PORT` | P2P peer the embedded node dials (repeatable) — joins the mesh formed by `qeuph node` daemons |
+| `--p2p-host` | interface the embedded node's P2P listener binds (default `127.0.0.1`; the daemon default is `0.0.0.0`) |
 | `--data-root` | where the embedded node keeps `chain.db` |
 | `--port-offset` | shift the embedded P2P/RPC ports so a second instance can run |
 | `--allow-remote` | permit a non-loopback bind (you own the firewall) |
+
+### The UI node is a full mesh participant
+
+The embedded node RUNS P2P: it dials `--connect` targets, accepts inbound
+connections from CLI daemons, syncs headers-first and relays blocks and
+transactions like any `qeuph node`. A browser-driven node and a
+terminal-driven node are interchangeable:
+
+```bash
+# terminal 1: a CLI daemon
+python3 -m qeuph.cli.main node --network regtest --p2p-port 39190 --rpc-port 39191
+
+# terminal 2: the UI node, dialing INTO the CLI mesh
+qeuph web --network regtest --connect 127.0.0.1:39190
+
+# terminal 3: a second CLI daemon dialing INTO the UI node
+python3 -m qeuph.cli.main node --network regtest \
+    --p2p-port 39290 --rpc-port 39291 --connect 127.0.0.1:41090
+```
+
+Blocks mined anywhere reach all three; a payment made in the browser's Send
+form appears in every node's mempool, and one made through
+`qeuph wallet send --rpc …` against any node appears in the UI. The full
+asserted version of this story (three CLI daemons + the web UI node + a
+remote-attach UI instance, both directions, regtest and testnet) is
+`python3 tools/e2e_three_nodes.py`.
+
+### Remote-attach mode (thin UI over an external node)
+
+`--embedded-node off --remote-rpc http://127.0.0.1:19091/` turns the suite
+into a pure explorer/wallet for an EXISTING daemon: every chain view
+(/api/status, /api/blocks, /api/tx/…, /api/address/…) is served from that
+node's JSON-RPC, the RPC console forwards to it, miner and generate routes
+are refused (the remote node owns its own miner), and wallet operations
+still sign LOCALLY — the remote node only ever receives signed
+transactions, never keys.
 
 `npm run` shortcuts: `start`, `dev` (verbose), `regtest`, `testnet`,
 `mainnet` (read-only), `node`, `node:mainnet`, `cli`, `test`, `smoke:web`.
@@ -183,8 +222,11 @@ caller-chosen paths.
 * The **master seed and the 24-word recovery phrase are never returned over
   HTTP.** `wallet mnemonic` and `wallet backup --out-mnemonic` are refused by
   the web route; the `argv` echoed in the response has `--passphrase` and
-  `--from-mnemonic` values masked; and phrase-, seed- and secret-key-shaped
-  text is redacted from any CLI output before it leaves the process. Use
+  `--from-mnemonic` values masked; phrase-, seed- and secret-key-shaped text
+  is redacted from any CLI output before it leaves the process; the wallet
+  info view and the create/restore responses never contain a phrase (a
+  dashboard GET also never CREATES a wallet — restoring one into the browser
+  is the only place a phrase is typed, and it is never echoed back). Use
   `qeuph wallet mnemonic` in a terminal you trust. (The refusal is matched
   against exact option names, and the parser tree is built with
   `allow_abbrev=False`, so `--out-mnem` cannot be used to slip past it.)
@@ -236,6 +278,11 @@ python3 -m qeuph.cli.main rpc getblock --url http://127.0.0.1:19091/ '{"height":
   can mine, submit blocks and stop the node.
 * `startminer` and `generate` are refused on mainnet; the daemon owns the
   solo miner there (`node --network mainnet --mine ADDR`).
+* `listutxos`/`listunspent` hide outpoints already spent by a pending
+  mempool transaction, and `getnonce` returns `max(chain nonce, pending
+  nonce)` — the same overlay picture `add_tx` validates the next
+  transaction against, so a wallet can chain payments while the first is
+  still unconfirmed.
 
 Methods (see `rpc help`):
 
@@ -380,10 +427,11 @@ qeuph/
 │   ├── main.py                     daemon wiring
 │   ├── cli/main.py                 command line interface
 │   └── web/server.py               node explorer + CLI-synced HTTP surface
-│       └── static/                 index.html, app.js, style.css, favicon.svg
-├── tests/                          408 tests
+│       └── static/                 index.html, style.css, favicon.svg
+├── tests/                          427 tests
 ├── tools/                          mine_genesis.py, web_smoke.py,
-│                                   e2e_check.py, wp_conformance.py
+│                                   e2e_check.py, e2e_three_nodes.py,
+│                                   wp_conformance.py
 └── docs/                           PORTING.md, PROTOCOL.md
 ```
 
@@ -400,7 +448,7 @@ pip install -e ".[dev]"
 python3 -m pytest tests/ -q
 ```
 
-408 tests, no network access required, ~170 s. Coverage:
+427 tests, no network access required, ~180 s. Coverage:
 
 * **Whitepaper conformance** (`test_whitepaper.py`) — the pinned genesis
   hash, every Appendix A parameter, the Table 5 emission values, the
@@ -450,15 +498,25 @@ python3 -m pytest tests/ -q
 * **Web** (`test_web.py`) — every HTTP route, the CLI mirror, and the safety
   properties (no key material in any response, mnemonic refused, loopback
   enforced, mining disabled on mainnet).
+* **UI↔CLI sync** (`test_web_sync.py`) — the dashboard Send route end to end
+  (sign, mempool, relay, exact decimals), the embedded node joining a real
+  `qeuph node` daemon's P2P mesh in BOTH directions, mempool-aware
+  `listutxos`/`getnonce`, remote-attach mode over a live daemon's JSON-RPC,
+  `--p2p-host` binding and graceful port-clash degradation, the deleted
+  orphaned UI staying deleted, and no phrase over HTTP even for unencrypted
+  wallets.
 * **Integration** (`test_integration.py`) — boots the real daemon, mines past
   maturity, settles transfers and exercises the RPC surface.
 
-Three developer checks drive real daemons over real sockets:
+Three developer checks drive real daemons over real sockets, plus the
+full-mesh UI check:
 
 ```bash
-python3 tools/web_smoke.py       # web suite: HTTP routes, CLI mirror, mine+send
-python3 tools/e2e_check.py       # two regtest daemons, P2P sync, send, reindex, auth
-python3 tools/wp_conformance.py  # every value the whitepaper pins, vs this build
+python3 tools/web_smoke.py          # web suite: HTTP routes, CLI mirror, mine+send
+python3 tools/e2e_check.py          # two regtest daemons, P2P sync, send, reindex, auth
+python3 tools/e2e_three_nodes.py    # 3 CLI nodes + web UI node mesh, both directions,
+                                    # remote-attach UI, regtest AND testnet profiles
+python3 tools/wp_conformance.py     # every value the whitepaper pins, vs this build
 ```
 
 ---

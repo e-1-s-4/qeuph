@@ -361,3 +361,29 @@ class TestStateIdentityAcrossReorg:
             assert cm.state.nonce_of(ah) == 0
         finally:
             cm.close()
+
+
+class TestForeignDataDir:
+    def test_foreign_network_chain_is_refused_not_crashed(self, tmp_path):
+        """A daemon pointed at ANOTHER network's data directory must fail
+        with a clear message, not an AttributeError inside the replay.
+
+        Found by the three-node E2E: a testnet daemon opening a regtest
+        data dir hit "canonical index does not start at genesis", replayed,
+        and dereferenced a block that could never exist."""
+        from qeuph.config import REGTEST as RT, TESTNET
+
+        reg_dir = str(tmp_path / "reg")
+        cm = ChainManager(RT.with_(data_dir=reg_dir))
+        mine(cm, b"\x33" * 64, n=3)
+        cm.close()
+
+        with pytest.raises(SystemExit, match="different chain"):
+            ChainManager(TESTNET.with_(data_dir=reg_dir))
+
+        # the regtest chain still opens cleanly afterwards
+        cm2 = ChainManager(RT.with_(data_dir=reg_dir))
+        try:
+            assert cm2.height() == 3
+        finally:
+            cm2.close()

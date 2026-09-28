@@ -129,9 +129,11 @@ class ChainManager:
         assert self.store is not None
         state, tip_hash, tip_height = self.store.load_state()
         if state is None or tip_hash is None:
+            self._refuse_foreign_store()
             return False
         ok, why = self.store.verify_main_chain(self.genesis.hash)
         if not ok:
+            self._refuse_foreign_store()
             logger.warning("canonical index inconsistent (%s); replaying from "
                            "genesis", why)
             self._replay_main_chain()
@@ -149,6 +151,22 @@ class ChainManager:
         self.tip_work = self.store.get_work(tip_hash) or self._block_work(tip)
         self._timestamps = self._collect_timestamps(tip)
         return True
+
+    def _refuse_foreign_store(self):
+        """Hard-stop when the data directory holds a DIFFERENT chain.
+
+        A testnet daemon pointed at a regtest data dir (or any genesis
+        mismatch) used to crash deep inside the replay with a raw
+        AttributeError; a directory that holds blocks but not THIS network's
+        genesis is by definition foreign, and no automatic replay can make
+        it ours.  Refuse loudly instead.
+        """
+        if self.store.has_blocks() and \
+                self.store.get_block_by_hash(self.genesis.hash) is None:
+            raise SystemExit(
+                f"data directory {self.data_dir} holds a different chain "
+                f"(no {self.network.name} genesis block). Point --data-dir "
+                f"at this network's directory or move the old one away.")
 
     def _replay_main_chain(self):
         """Rebuild UTXO/nonce tables by re-applying the canonical blocks.
@@ -178,8 +196,13 @@ class ChainManager:
         work = self._block_work(self.genesis)
         self.store.set_block_work(self.genesis.hash, work)
         for h, hsh in good:
+            if h == 0:
+                continue          # genesis work is already recorded above
+            blk = self.store.get_block_by_hash(hsh)
+            if blk is None:
+                break             # defensive: never dereference a gap
+            work += self._block_work(blk)
             self.store.set_block_work(hsh, work)
-            work += self._block_work(self.store.get_block_by_hash(hsh))
 
     def _collect_timestamps(self, tip: Block) -> List[int]:
         """Timestamps of the trailing window ending at tip (oldest first)."""

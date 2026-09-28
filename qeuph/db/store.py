@@ -331,6 +331,12 @@ class Store:
                 "LEFT JOIN main_chain c ON c.height = m.height + 1 "
                 "WHERE c.height IS NULL ORDER BY m.height").fetchall()
 
+    def has_blocks(self) -> bool:
+        """True when ANY block is stored (any chain, any genesis)."""
+        with self._lock:
+            row = self._db.execute("SELECT 1 FROM blocks LIMIT 1").fetchone()
+            return row is not None
+
     def raw_main_chain(self):
         """[(height, hash)] for the whole canonical index, oldest first.
 

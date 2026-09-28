@@ -263,7 +263,12 @@ class Mempool:
                 self._fees.pop(txid, None)
                 self._sizes.pop(txid, None)
                 self._added_at.pop(txid, None)
-            self._rebuild_overlay()
+            # Rebuild ONLY when something was dropped: the overlay built
+            # above is already correct when `drop` is empty, and the old
+            # unconditional second rebuild made every reorg resync the
+            # pool twice (O(2n) validation work on the hot reorg path).
+            if drop:
+                self._rebuild_overlay()
             return len(drop)
 
     # ------------------------------------------------------------------
@@ -368,6 +373,28 @@ class Mempool:
 
     def total_size(self) -> int:
         return sum(self._sizes.get(t) or 0 for t in self.txs)
+
+    def pending_spent_outpoints(self) -> set:
+        """Outpoints spent by transactions waiting in the pool.
+
+        Wallet listings (`listutxos` / `listunspent`) filter these out, so a
+        second payment cannot pick an output that is already committed to a
+        pending transaction - the next `add_tx` would reject it as a missing
+        UTXO anyway, and reporting the spent output as available made every
+        rapid double payment from one address fail confusingly.
+        """
+        with self.lock:
+            return set(self._overlay_removed)
+
+    def pending_nonce_of(self, addr_hash: bytes) -> Optional[int]:
+        """The highest per-address txnonce committed to the pool, if any.
+
+        `getnonce` returns max(chain nonce, this) so a wallet can chain a
+        second transaction while the first is still pending - exactly the
+        overlay picture `add_tx` validates against.
+        """
+        with self.lock:
+            return self._addr_pending_nonce.get(addr_hash)
 
     def __len__(self):
         return len(self.txs)

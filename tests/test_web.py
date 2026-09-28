@@ -87,12 +87,20 @@ class TestStaticAndStatus:
 
     def test_assets_served(self, web):
         cli, _ = web
-        for path, needle in (("/app.js", "postJSON"),
-                             ("/style.css", "--cyan"),
+        for path, needle in (("/style.css", "--cyan"),
                              ("/favicon.svg", "<svg")):
             status, body = cli.raw(path)
             assert status == 200, path
             assert needle in body, path
+
+    def test_orphaned_app_js_is_gone(self, web):
+        """app.js was an orphaned, untested second UI (zero element IDs in
+        common with index.html).  It was deleted; the route must be gone so
+        the dead asset can never be resurrected silently."""
+        cli, _ = web
+        with pytest.raises(urllib.error.HTTPError) as e:
+            cli.raw("/app.js")
+        assert e.value.code == 404
 
     def test_unknown_path_404(self, web):
         cli, _ = web

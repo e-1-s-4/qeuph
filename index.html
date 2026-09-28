@@ -503,11 +503,11 @@
               <button onclick="restoreMnemonicPrompt()" class="text-xs px-2.5 py-1 bg-slate-800 text-slate-300 border border-slate-700 rounded hover:bg-slate-700 transition">Restore Phrase</button>
             </div>
           </div>
-          <div class="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs font-mono text-cyan-300 break-words leading-relaxed select-all" id="wallet-mnemonic-box">
+          <div class="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs font-mono text-cyan-300 break-words leading-relaxed" id="wallet-mnemonic-box">
             Loading seed...
           </div>
           <p class="text-[11px] text-slate-400">
-            All ML-DSA-87 public and private keys are deterministically derived via <code class="text-cyan-400">SHA3-512(master_seed || LE32(index))</code>.
+            🔒 The recovery phrase is <span class="text-amber-400">never transmitted over HTTP</span>. Back it up once with <code class="text-cyan-400">qeuph wallet mnemonic</code> in a terminal. All ML-DSA-87 keys derive via <code class="text-cyan-400">SHA3-512(master_seed || LE32(index))</code>.
           </p>
         </div>
       </div>
@@ -544,6 +544,11 @@
                 <label class="block text-slate-400 mb-1">Network Fee (QUH)</label>
                 <input type="number" step="0.001" id="send-fee" value="0.01" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono text-xs focus:border-cyan-500 focus:outline-none">
               </div>
+            </div>
+
+            <div>
+              <label class="block text-slate-400 mb-1">Wallet Passphrase <span class="text-rose-400">*</span></label>
+              <input type="password" id="send-passphrase" placeholder="seals the signature request - never stored" autocomplete="off" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono text-xs focus:border-cyan-500 focus:outline-none">
             </div>
 
             <button onclick="submitTransaction()" id="btn-send-tx" class="w-full py-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition shadow-md shadow-cyan-600/20">
@@ -1148,26 +1153,27 @@
         const res = await fetch('/api/wallet/info');
         const data = await res.json();
 
-        document.getElementById('wallet-mnemonic-box').textContent = data.mnemonic;
+        document.getElementById('wallet-mnemonic-box').textContent = data.mnemonic ||
+          'No wallet on this host yet - use "Generate New Seed" to create one.';
 
         const list = document.getElementById('wallet-addresses-list');
         let html = '';
-        data.addresses.forEach(a => {
+        (data.addresses || []).forEach(a => {
           html += `
             <div class="p-3 bg-slate-950 border border-slate-800 rounded-lg space-y-1">
               <div class="flex items-center justify-between">
                 <span class="text-cyan-400 font-bold">Address #${a.index}</span>
-                <span class="text-emerald-400 font-semibold">${a.balance_quh.toFixed(4)} QUH</span>
+                <span class="text-emerald-400 font-semibold">${Number(a.balance_quh).toFixed(4)} QUH</span>
               </div>
               <div class="text-slate-300 break-all select-all font-mono text-[11px]">${a.address}</div>
               <div class="text-[10px] text-slate-500 flex justify-between">
-                <span>Spendable: ${a.matured_quh.toFixed(4)} QUH</span>
+                <span>Spendable: ${Number(a.matured_quh).toFixed(4)} QUH</span>
                 <span>TxNonce: ${a.nonce}</span>
               </div>
             </div>
           `;
         });
-        list.innerHTML = html;
+        list.innerHTML = html || '<div class="text-slate-500 text-xs p-3">No wallet loaded.</div>';
 
       } catch (e) {
         console.error('Refresh wallet error:', e);
@@ -1175,27 +1181,45 @@
     }
 
     async function generateNewMnemonic() {
+      const pass = prompt('Choose a passphrase to SEAL the new wallet keystore:\n(the recovery phrase is never shown in the browser - back it up with `qeuph wallet mnemonic`)');
+      if (pass === null) return;
+      if (!pass) { alert('A passphrase is required - the UI does not create unencrypted wallets.'); return; }
       try {
-        const res = await fetch('/api/wallet/generate', {method: 'POST'});
+        const res = await fetch('/api/wallet/generate', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({passphrase: pass})
+        });
         const data = await res.json();
-        document.getElementById('wallet-mnemonic-box').textContent = data.mnemonic;
+        if (data.success) {
+          document.getElementById('wallet-mnemonic-box').textContent =
+            'Wallet sealed (AES-256-GCM). Run `qeuph wallet mnemonic` in a terminal to view your 24-word recovery phrase ONCE and write it down.';
+          alert('Wallet created and sealed.\n\nBack it up NOW from a terminal:\n  qeuph wallet mnemonic\n\nAddress #0: ' + data.address);
+          refreshWallet();
+          fetchStatus();
+        } else {
+          alert('Create failed: ' + (data.error || data.detail || 'unknown error'));
+        }
       } catch (e) {
-        console.error('Generate mnemonic error:', e);
+        console.error('Generate wallet error:', e);
       }
     }
 
     async function restoreMnemonicPrompt() {
       const phrase = prompt('Enter your 24-word BIP-39 recovery phrase:');
       if (!phrase) return;
+      const pass = prompt('Choose a passphrase to SEAL the restored keystore:');
+      if (pass === null) return;
+      if (!pass) { alert('A passphrase is required.'); return; }
       try {
         const res = await fetch('/api/wallet/restore', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({mnemonic: phrase})
+          body: JSON.stringify({mnemonic: phrase, passphrase: pass})
         });
         const data = await res.json();
         if (data.success) {
-          alert('Wallet successfully restored!');
+          alert('Wallet successfully restored and sealed!');
           refreshWallet();
           fetchStatus();
         } else {
@@ -1211,17 +1235,29 @@
       const amount = parseFloat(document.getElementById('send-amount').value);
       const fee = parseFloat(document.getElementById('send-fee').value || 0.01);
       const from_index = parseInt(document.getElementById('send-from-index').value || 0);
+      const passphrase = document.getElementById('send-passphrase').value;
 
       const statusBox = document.getElementById('send-tx-status');
       statusBox.classList.remove('hidden');
       statusBox.className = 'text-xs p-3 rounded-lg font-mono bg-slate-900 border border-slate-700 text-slate-300';
       statusBox.textContent = 'Signing transaction with ML-DSA-87...';
 
+      if (!to || isNaN(amount) || amount <= 0) {
+        statusBox.className = 'text-xs p-3 rounded-lg font-mono bg-rose-950/80 border border-rose-800 text-rose-300';
+        statusBox.textContent = '❌ Recipient and a positive amount are required.';
+        return;
+      }
+      if (!passphrase) {
+        statusBox.className = 'text-xs p-3 rounded-lg font-mono bg-rose-950/80 border border-rose-800 text-rose-300';
+        statusBox.textContent = '❌ Wallet passphrase required to unlock signing (never stored).';
+        return;
+      }
+
       try {
         const res = await fetch('/api/wallet/send', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({to, amount, fee, from_index})
+          body: JSON.stringify({to, amount, fee, from_index, passphrase})
         });
         const data = await res.json();
         if (data.success) {
@@ -1233,6 +1269,7 @@
           `;
           document.getElementById('send-to-addr').value = '';
           document.getElementById('send-amount').value = '';
+          document.getElementById('send-passphrase').value = '';
           fetchStatus();
           refreshMempool();
         } else {

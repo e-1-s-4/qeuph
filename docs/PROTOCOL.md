@@ -200,6 +200,12 @@ because of the per-epoch floor.
 * Per-address nonce chaining is enforced by validating against the chain state
   overlaid with the pending pool, so a transaction with nonce *n+1* cannot
   enter the pool before the one with nonce *n*.
+* The pool exposes its pending-spends overlay to the wallet surfaces:
+  `listutxos`/`listunspent` hide outpoints spent by a pooled transaction,
+  and `getnonce` returns `max(chain nonce, pending nonce)`, so a second
+  payment can be built and chained while the first is still unconfirmed
+  (a blind chain-state listing made every rapid second send fail with a
+  confusing "missing UTXO" / "out-of-order nonce" rejection).
 * Block templates are ranked by the fee-per-byte cached at admission time
   (the overlay mutates, so fees cannot be recomputed later).
 * **Lock ordering.** The mempool never calls into the chain while holding
@@ -244,7 +250,9 @@ on a block boundary.
 On load the canonical index is re-verified: genesis-anchored, contiguous, and
 with intact parent links. A damaged index triggers a replay that rebuilds the
 UTXO/nonce tables by re-applying the canonical blocks and truncates to the
-last provable block.
+last provable block. A data directory that holds a chain with a DIFFERENT
+genesis (e.g. a testnet daemon pointed at a regtest directory) is refused
+with a clear operator-facing error instead of being replayed into a crash.
 
 ## P2P wire format
 
@@ -344,12 +352,28 @@ serves a node explorer on 127.0.0.1:3000. Its contract:
 * the master seed and the 24-word recovery phrase are **never** returned:
   `wallet mnemonic`, `wallet backup --out-mnemonic` and `--show-seed` are
   refused by the web route, phrase/seed/secret-key-shaped text is redacted
-  from any CLI output before it leaves the process, and the `argv` echoed
-  back in the response has `--passphrase` / `--from-mnemonic` values masked;
+  from any CLI output before it leaves the process, the `argv` echoed
+  back in the response has `--passphrase` / `--from-mnemonic` values masked,
+  the wallet info view never contains a phrase (even for an unencrypted
+  wallet file), a GET of the wallet info never CREATES a wallet, and the
+  create/restore responses never echo a phrase (restore is the only flow
+  that accepts one, and it is never reflected back);
 * the bind address is loopback unless `--allow-remote` is passed (decided
   with `ipaddress.is_loopback`, so `localhost` and `127.0.0.2` are accepted
   and `""` / `0.0.0.0` are not), and the embedded node runs regtest by
-  default with the miner controls disabled on mainnet.
+  default with the miner controls disabled on mainnet;
+* the embedded node RUNS P2P (loopback-bound unless `--p2p-host` says
+  otherwise): it dials every `--connect HOST:PORT` target, accepts inbound
+  connections from CLI daemons, and syncs/relays like any `qeuph node`, so
+  a UI node and a CLI node are interchangeable mesh members;
+* with `--embedded-node off --remote-rpc URL` the suite becomes a thin
+  client of an EXTERNAL daemon: every chain view is served from that node's
+  JSON-RPC, the RPC console forwards to it, miner/generate/network-switch
+  routes are refused, wallet reads still derive addresses locally, and
+  wallet sends sign locally and hand the remote node only the signed
+  transaction (`sendrawtransaction`); `chain` CLI-bridge commands are
+  refused because they would read the local (empty) database and lie about
+  the attached node.
 
 Command surface. The allowlist is a group *and* a per-subcommand set, so
 the HTTP surface cannot reach the dangerous verbs:

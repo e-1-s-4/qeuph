@@ -179,7 +179,9 @@ class QNode:
     def __init__(self, network: Network, chain: ChainManager,
                  mempool: Mempool, connect_peers: Optional[List[Tuple[str, int]]] = None,
                  seed_hosts: Optional[List[str]] = None,
-                 max_peers: int = C.MAX_PEERS):
+                 max_peers: int = C.MAX_PEERS,
+                 bind_host: str = "0.0.0.0",
+                 strict_listen: bool = True):
         self.network = network
         self.chain = chain
         self.mempool = mempool
@@ -187,8 +189,20 @@ class QNode:
         self.max_peers = max_peers
         self.connect_peers = list(connect_peers or [])
         self.seed_hosts = list(seed_hosts or [])
+        # bind_host controls which interface the P2P listener takes.  The
+        # daemon defaults to every interface (a node that cannot accept
+        # inbound connections cannot help the network); the web suite's
+        # embedded node passes a loopback host so a browser-facing process
+        # never opens a port wider than it needs.
+        self.bind_host = bind_host
+        # strict_listen=True (daemon): a bind failure is a hard error, so an
+        # operator never runs a node that silently serves no peers.
+        # strict_listen=False (embedded web node): degrade to outbound-only
+        # dialing instead of taking the whole UI down over a port clash.
+        self.strict_listen = strict_listen
         self.server: Optional[asyncio.AbstractServer] = None
         self.synced = False
+        self.listen_failed: Optional[str] = None
         # bounded recently-relayed caches (LRU by insertion order)
         self._known_txs: OrderedDict[str, float] = OrderedDict()
         self._known_blocks: OrderedDict[str, float] = OrderedDict()
@@ -221,10 +235,22 @@ class QNode:
 
     # ------------------------------------------------------------------
     async def start(self):
-        self.server = await asyncio.start_server(
-            self._handle_connection, "0.0.0.0", self.network.p2p_port,
-            reuse_address=True, backlog=64)
-        logger.info("p2p listening on %d", self.network.p2p_port)
+        if self.bind_host is not None:
+            try:
+                self.server = await asyncio.start_server(
+                    self._handle_connection, self.bind_host,
+                    self.network.p2p_port, reuse_address=True, backlog=64)
+            except OSError as e:
+                if self.strict_listen:
+                    raise
+                self.listen_failed = (
+                    f"p2p listen on {self.bind_host}:{self.network.p2p_port} "
+                    f"failed: {e} (continuing outbound-only)")
+                logger.warning(self.listen_failed)
+                self.server = None
+        if self.server is not None:
+            logger.info("p2p listening on %s:%d", self.bind_host,
+                        self.network.p2p_port)
         for host, port in self.connect_peers:
             self._add_known_addr(host, port)
             asyncio.ensure_future(self._connect_peer(host, port))

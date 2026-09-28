@@ -103,6 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
     node.add_argument("--seed", action="append", metavar="HOST",
                       help="DNS seed to resolve for peers (repeatable)")
     node.add_argument("--rpc-host", default=C.DEFAULT_RPC_HOST)
+    node.add_argument("--p2p-host", default="0.0.0.0",
+                      help="interface the P2P listener binds (default: all)")
     node.add_argument("--p2p-port", type=int, default=None)
     node.add_argument("--rpc-port", type=int, default=None)
     node.add_argument("--rpc-user", default=None, help="RPC basic-auth user")
@@ -251,7 +253,18 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--data-dir", default=None)
     web.add_argument("--embedded-node", default=None,
                      choices=["regtest", "testnet", "mainnet", "off"],
-                     help="run a node in-process (default: regtest)")
+                     help="run a node in-process (default: regtest); 'off' "
+                          "attaches the UI to --remote-rpc instead")
+    web.add_argument("--remote-rpc", default=None, metavar="URL",
+                     help="with --embedded-node off: JSON-RPC URL of the "
+                          "external node this UI attaches to (e.g. "
+                          "http://127.0.0.1:19091/)")
+    web.add_argument("--connect", action="append", metavar="HOST:PORT",
+                     help="P2P peer the embedded node dials (repeatable); "
+                          "joins the mesh formed by `qeuph node` daemons")
+    web.add_argument("--p2p-host", default="127.0.0.1",
+                     help="interface the embedded node's P2P listener binds "
+                          "(default: loopback)")
     web.add_argument("--allow-remote", action="store_true",
                      help="permit a non-loopback bind (you own the firewall)")
 
@@ -894,8 +907,15 @@ def cmd_web(args):
     # serve() takes a network NAME; passing the Network object made
     # `qeuph web` exit with "unknown network Network(name='mainnet', ...)",
     # so a documented entry point simply did not start.
+    if args.embedded_node == "off" and not args.remote_rpc:
+        sys.exit("--embedded-node off requires --remote-rpc URL (the JSON-RPC "
+                 "endpoint of the node this UI attaches to)")
+    if args.embedded_node != "off" and args.remote_rpc:
+        sys.exit("--remote-rpc only applies with --embedded-node off")
     serve(host=args.host, port=args.port, network=net.name,
           data_root=net.data_dir, embedded=args.embedded_node,
+          connect_peers=args.connect, p2p_host=args.p2p_host,
+          remote_rpc=args.remote_rpc,
           allow_remote=args.allow_remote)
 
 

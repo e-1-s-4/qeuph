@@ -735,8 +735,20 @@ class RPCService:
                      else [(k, v) for d in outputs_arg for k, v in d.items()])
             for addr_str, val in pairs:
                 ahash = self._addr_hash(addr_str, hrp)
-                val_quphi = (round(float(val) * C.QUPHI_PER_QUH)
-                             if isinstance(val, (float, int)) else int(val))
+                # Exact conversion.  `round(float * 1e8)` silently lost
+                # quphi (0.1 is not representable in binary floating point),
+                # so a JSON-RPC client paying "0.1" could mint or burn atoms
+                # relative to what the user typed.  Decimal(str(x)) is the
+                # same rule the CLI's _to_quphi applies.
+                if isinstance(val, float):
+                    from decimal import Decimal, InvalidOperation
+                    try:
+                        val_quphi = int(Decimal(str(val)) * C.QUPHI_PER_QUH)
+                    except InvalidOperation:
+                        raise RpcError(E_INVALID_PARAMS,
+                                       f"bad output value {val!r}")
+                else:
+                    val_quphi = int(val)
                 if val_quphi <= 0:
                     raise RpcError(E_INVALID_PARAMS,
                                    "output value must be positive")
@@ -876,9 +888,24 @@ class RPCService:
                             "matured_balance": mbal,
                             "matured_balance_quh": mbal / C.QUPHI_PER_QUH}
                 if method == "getnonce":
-                    return {"address": addr, "nonce": nonce}
+                    # pending-aware: the mempool overlay is what add_tx
+                    # validates the NEXT transaction against, so a wallet
+                    # chaining a second payment must see max(chain, pending)
+                    pend = self.node.mempool.pending_nonce_of(ahash) \
+                        if self.node else None
+                    return {"address": addr, "nonce": max(nonce, pend or 0),
+                            "chain_nonce": nonce, "pending_nonce": pend}
                 matured_only = bool(self._p(params, "matured_only", False))
                 rows = chain.state.utxos_for(ahash, h, matured_only=matured_only)
+                # hide outputs already committed to a pending mempool tx:
+                # the pool would reject a second spend of them, and the
+                # wallet must not select what it cannot spend (chain.lock ->
+                # mempool.lock is the sanctioned acquisition order).
+                if method == "listutxos":
+                    spent = self.node.mempool.pending_spent_outpoints() \
+                        if self.node else set()
+                    rows = [(t, i, u) for t, i, u in rows
+                            if (t, i) not in spent]
                 if method == "listutxos":
                     return {"utxos": [{
                         "txid": t.hex(), "index": i, "value": u.value,
@@ -900,6 +927,8 @@ class RPCService:
             with chain.lock:
                 rows = chain.state.utxos_for(ahash, chain.height(),
                                              matured_only=matured_only)
+                spent = self.node.mempool.pending_spent_outpoints() \
+                    if self.node else set()
                 from qeuph.core.state import confirmations
                 out = [{
                     "txid": t.hex(), "vout": i, "value": u.value,
@@ -907,7 +936,7 @@ class RPCService:
                     "is_coinbase": u.is_coinbase,
                     "mature": is_mature(u, chain.height()),
                     "confirmations": confirmations(u, chain.height()),
-                } for t, i, u in rows]
+                } for t, i, u in rows if (t, i) not in spent]
             return out
 
         # ---------------- network ----------------
