@@ -32,7 +32,7 @@ def main():
     env = dict(os.environ, TMPDIR=data_root, PYTHONPATH=ROOT)
     proc = subprocess.Popen(
         [sys.executable, "-m", "qeuph.web.server", "--port", str(PORT),
-         "--data-root", data_root],
+         "--data-root", data_root, "--port-offset", "12000"],
         cwd=ROOT, env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:

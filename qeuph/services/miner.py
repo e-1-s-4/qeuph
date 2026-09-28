@@ -85,6 +85,10 @@ class SoloMiner:
     def payout_hash(self) -> Optional[bytes]:
         return self._payout
 
+    @property
+    def payout_address(self) -> Optional[bytes]:
+        return self._payout
+
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------

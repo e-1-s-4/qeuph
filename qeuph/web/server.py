@@ -78,6 +78,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(_PKG_DIR))     # <repo>
 # the UI ships inside the package, so it works from an installed wheel and
 # from a source checkout alike
 STATIC_DIRS = [
+    _REPO_ROOT,
     os.path.join(_PKG_DIR, "static"),
     os.path.join(_REPO_ROOT, "web"),          # legacy top-level web/ directory
 ]
@@ -168,6 +169,8 @@ class NodeManager:
                                   C.DEFAULT_RPC_HOST, self.network.rpc_port,
                                   lambda: self._stop_evt)
             self.rpc.start_background(self._loop)
+            if self.rpc.port != self.network.rpc_port:
+                self.network = dataclasses.replace(self.network, rpc_port=self.rpc.port)
             self.started_node = True
             logger.info("embedded node opened on %s at height %d "
                         "(rpc %s)", network_name, self.chain.height(),
@@ -278,6 +281,27 @@ class NodeManager:
                        "threads": self.miner.threads,
                        "payout_address": self.miner.payout_address_hex})
             st["wallet"] = self.wallet_info()
+            bal_quh = 0.0
+            mat_quh = 0.0
+            nonce = 0
+            w_addr = None
+            if os.path.exists(self.wallet_path()):
+                try:
+                    rep = self.address_report(count=1)
+                    if rep.get("addresses"):
+                        a0 = rep["addresses"][0]
+                        w_addr = a0["address"]
+                        bal_quh = a0["balance_quh"]
+                        mat_quh = a0["matured_quh"]
+                        nonce = a0["nonce"]
+                except Exception:
+                    pass
+            st["wallet_balance_quh"] = bal_quh
+            st["wallet_matured_quh"] = mat_quh
+            st["wallet_nonce"] = nonce
+            st["wallet_address"] = w_addr
+            if not st.get("payout_address") and w_addr:
+                st["payout_address"] = w_addr
             return st
 
     def address_report(self, count: int = 5, index: Optional[int] = None,
@@ -500,6 +524,8 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
                 return self.send_json(self.blocks(limit))
             if path == "/api/mempool":
                 return self.send_json(self.mempool_info())
+            if path in ("/api/wallet/info", "/api/wallet/summary"):
+                return self.send_json(self.wallet_ui_info())
             if path == "/api/peers":
                 return self.send_json({"peers": NODE.node.peer_info()
                                        if NODE.node else []})
@@ -573,16 +599,28 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "payout": payout})
             if path == "/api/generate":
                 return self.send_json(self.generate(data))
-            if path == "/api/network":
+            if path in ("/api/miner/mine_blocks", "/api/miner/mine"):
+                return self.send_json(self.miner_ui_mine_blocks(data))
+            if path == "/api/miner/toggle":
+                return self.send_json(self.miner_ui_toggle(data))
+            if path == "/api/wallet/generate":
+                return self.send_json(self.wallet_ui_generate())
+            if path == "/api/wallet/restore":
+                return self.send_json(self.wallet_ui_restore(data))
+            if path == "/api/wallet/send":
+                return self.send_json(self.wallet_ui_send(data))
+            if path in ("/api/network", "/api/network/switch"):
                 name = str(data.get("network", "regtest"))
                 if name not in ("mainnet", "testnet", "regtest"):
                     raise HttpError(f"unknown network {name}")
                 if NODE.miner.is_mining():
                     NODE.miner.stop()
                 status = NODE.open(name)
-                return self.send_json({"ok": True, "status": status})
-            if path == "/api/crypto/test":
-                return self.send_json(self.crypto_test(data))
+                return self.send_json({"ok": True, "success": True, "status": status, "network": name})
+            if path in ("/api/crypto/test", "/api/crypto/test_sign"):
+                res = self.crypto_test(data)
+                res["success"] = True
+                return self.send_json(res)
             return self.send_error_json("not found", 404)
         except HttpError as e:
             return self.send_error_json(e.message, e.code)
@@ -752,6 +790,8 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             "message": msg.decode(errors="replace"),
             "pk_bytes": len(pk), "sk_bytes": len(sk),
             "sig_bytes": len(sig),
+            "pk_hex": pk.hex(),
+            "sig_hex": sig.hex(),
             "pk_prefix": pk.hex()[:64],
             "sig_prefix": sig.hex()[:64],
             "verified": ok, "verified_pure_python": pure,
@@ -760,7 +800,131 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
             "verify_ms": round(verify_ms, 3),
             "verify_pure_ms": round(pure_ms, 3),
             "algorithm": "ML-DSA-87 (FIPS 204), NIST category 5",
+            "category": "NIST Category 5 (256-bit quantum)",
         }
+
+    def wallet_ui_info(self) -> dict:
+        path = NODE.wallet_path()
+        if not os.path.exists(path):
+            if not NODE.network.is_mainnet:
+                try:
+                    from qeuph.wallet import Wallet
+                    w = Wallet.create(hrp=NODE.network.hrp, network=NODE.network.name)
+                    w.save(path, "")
+                    ahash = addr_mod.address_to_hash(w.address_at(0), NODE.network.hrp)
+                    if ahash and not NODE.miner.payout_address:
+                        NODE.miner.set_payout(ahash)
+                except Exception:
+                    pass
+        rep = NODE.address_report(count=5)
+        mnemonic = "Sealed in encrypted keystore. Use `qeuph wallet mnemonic` in terminal."
+        if os.path.exists(path):
+            try:
+                doc = keystore.load_wallet_doc(path)
+                if "aes" not in doc:
+                    seed = keystore.load_wallet(path, "")
+                    from qeuph.wallet.mnemonic import mnemonic_from_seed
+                    mnemonic = mnemonic_from_seed(seed)
+            except Exception:
+                pass
+        return {
+            "exists": rep.get("exists", os.path.exists(path)),
+            "mnemonic": mnemonic,
+            "addresses": rep.get("addresses", []),
+            "network": NODE.network.name,
+            "hrp": NODE.network.hrp,
+        }
+
+    def wallet_ui_generate(self) -> dict:
+        from qeuph.wallet import Wallet
+        from qeuph.wallet.mnemonic import mnemonic_from_seed
+        w = Wallet.create(hrp=NODE.network.hrp, network=NODE.network.name)
+        w.save(NODE.wallet_path(), "")
+        payout = w.address_at(0)
+        ahash = addr_mod.address_to_hash(payout, NODE.network.hrp)
+        if ahash:
+            NODE.miner.set_payout(ahash)
+        mn = mnemonic_from_seed(w.master_seed)
+        return {"success": True, "mnemonic": mn, "address": payout}
+
+    def wallet_ui_restore(self, data: dict) -> dict:
+        from qeuph.wallet import Wallet
+        phrase = str(data.get("mnemonic", "")).strip()
+        try:
+            w = Wallet.from_mnemonic(phrase, hrp=NODE.network.hrp, network=NODE.network.name)
+            w.save(NODE.wallet_path(), "")
+            payout = w.address_at(0)
+            ahash = addr_mod.address_to_hash(payout, NODE.network.hrp)
+            if ahash:
+                NODE.miner.set_payout(ahash)
+            return {"success": True, "address": payout}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def wallet_ui_send(self, data: dict) -> dict:
+        from qeuph.wallet import Wallet
+        to_addr = str(data.get("to", "")).strip()
+        amt_quh = float(data.get("amount", 0) or 0)
+        fee_quh = float(data.get("fee", 0.01) or 0.01)
+        from_idx = int(data.get("from_index", 0) or 0)
+        path = NODE.wallet_path()
+        if not os.path.exists(path):
+            return {"success": False, "error": "Wallet file does not exist on disk"}
+        try:
+            w = Wallet.open(path, passphrase="", hrp=NODE.network.hrp, network=NODE.network.name)
+        except Exception as e:
+            return {"success": False, "error": f"Failed to unlock wallet: {e}"}
+        
+        amt_quphi = round(amt_quh * C.QUPHI_PER_QUH)
+        fee_quphi = round(fee_quh * C.QUPHI_PER_QUH)
+        if amt_quphi <= 0:
+            return {"success": False, "error": "Amount must be positive"}
+        if fee_quphi < C.MIN_RELAY_FEE_RATE:
+            fee_quphi = C.MIN_RELAY_FEE_RATE
+        try:
+            with NODE.chain.lock:
+                tx = w.send(to_addr, amt_quphi, fee_quphi, from_index=from_idx,
+                            state=NODE.chain.state, height=NODE.chain.height(),
+                            mtp=NODE.chain.median_time_past())
+            NODE.mempool.accept(tx)
+            if NODE.node:
+                NODE.node.broadcast_tx(tx)
+            return {
+                "success": True,
+                "txid": tx.txid().hex(),
+                "size_bytes": len(tx.serialize()),
+                "inputs_count": len(tx.inputs),
+                "nonce": tx.inputs[0].txnonce,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def miner_ui_toggle(self, data: dict) -> dict:
+        if NODE.network.is_mainnet:
+            return {"ok": False, "mining": False, "error": "Mining disabled on mainnet in web UI"}
+        if NODE.miner.is_mining():
+            NODE.miner.stop()
+        else:
+            if not NODE.miner.payout_hash:
+                rep = NODE.address_report(count=1)
+                if rep.get("addresses"):
+                    a0 = rep["addresses"][0]["address"]
+                    ahash = addr_mod.address_to_hash(a0, NODE.network.hrp)
+                    if ahash:
+                        NODE.miner.set_payout(ahash)
+            NODE.miner.start()
+        return {"ok": True, "mining": NODE.miner.is_mining(), "miner": NODE.miner.stats()}
+
+    def miner_ui_mine_blocks(self, data: dict) -> dict:
+        count = int(data.get("count", data.get("blocks", 1)) or 1)
+        req = dict(data, count=count)
+        if not req.get("address"):
+            rep = NODE.address_report(count=1)
+            if rep.get("addresses"):
+                req["address"] = rep["addresses"][0]["address"]
+        res = self.generate(req)
+        res["success"] = True
+        return res
 
     # -- actions --------------------------------------------------------
     def rpc_bridge(self, data: dict) -> dict:

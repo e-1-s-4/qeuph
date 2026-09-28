@@ -402,7 +402,16 @@ class RPCService:
                 self._handle({"jsonrpc": "2.0", "id": 1, "method": method,
                               "params": params})
 
-        self._server = ThreadingHTTPServer((self.host, self.port), Handler)
+        try:
+            self._server = ThreadingHTTPServer((self.host, self.port), Handler)
+        except OSError as e:
+            if getattr(e, "errno", None) == 98:
+                # If preferred port is occupied (e.g. by another process or test runner),
+                # allocate an ephemeral port.
+                self._server = ThreadingHTTPServer((self.host, 0), Handler)
+                self.port = self._server.server_address[1]
+            else:
+                raise
         self._server.daemon_threads = True
         t = threading.Thread(target=self._server.serve_forever, daemon=True,
                              name="qeuph-rpc")

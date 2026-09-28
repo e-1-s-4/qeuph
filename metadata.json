@@ -37,6 +37,7 @@
     "json-rpc",
     "solo-mining",
     "encrypted-wallet",
-    "node-explorer"
+    "node-explorer",
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }
