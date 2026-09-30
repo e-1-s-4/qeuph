@@ -412,7 +412,15 @@ class TestNodeShutdown:
             t0 = time.time()
             await asyncio.wait_for(node.stop(), timeout=5.0)
             dt = time.time() - t0
+            # Close AND await the client side.  A bare `writer.close()` leaves
+            # the transport attached to the loop, and the Windows proactor
+            # then spins forever in `asyncio.run()` teardown - a hang in the
+            # test, not in the node.
             writer.close()
+            try:
+                await writer.wait_closed()
+            except (OSError, ConnectionError):
+                pass
             assert dt < 4.0, f"stop took {dt:.1f}s (deadlock?)"
             assert not node.peers
 

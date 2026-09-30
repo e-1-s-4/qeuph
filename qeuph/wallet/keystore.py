@@ -69,14 +69,23 @@ class WalletError(Exception):
 
 
 def kdf_iterations() -> int:
+    """Iteration count to use when SEALING A NEW wallet file.
+
+    The result is always inside the range `load_wallet` accepts
+    (`KDF_ITERATIONS_V1` .. `MAX_KDF_ITERATIONS`), so a file this module
+    writes can always be read back by it.  An override below that floor used
+    to write a wallet declaring e.g. 1,000 iterations which the loader then
+    rejected as "implausible": the seed could not be recovered from its own
+    wallet, ever.  Raising the count above the shipped 600,000 still works
+    (that is the documented use for a high-value seed on fast hardware).
+    """
     override = os.environ.get("QEUPH_WALLET_KDF_ITERATIONS")
     if override:
         try:
             n = int(override)
-            if n >= 1000:
-                return n
         except ValueError:
-            pass
+            n = KDF_ITERATIONS
+        return max(KDF_ITERATIONS_V1, min(n, MAX_KDF_ITERATIONS))
     return KDF_ITERATIONS
 
 

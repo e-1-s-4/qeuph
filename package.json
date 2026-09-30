@@ -33,6 +33,8 @@
     "test": "python3 -m pytest tests/",
     "smoke:web": "python3 tools/web_smoke.py",
     "smoke:e2e": "python3 tools/e2e_check.py",
+    "smoke:networks": "python3 tools/network_check.py",
+    "preflight": "python3 -m qeuph.cli.main preflight",
     "conformance": "python3 tools/wp_conformance.py",
     "genesis": "python3 -m qeuph.cli.main genesis",
     "emission": "python3 -m qeuph.cli.main emission",

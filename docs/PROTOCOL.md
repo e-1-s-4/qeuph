@@ -276,6 +276,22 @@ is skipped rather than desynchronising the stream.
   agent, height, tip hash, timestamp) and answers `verack`. A network
   mismatch is an immediate disconnect **and a ban**; a protocol version below
   the minimum disconnects; a gross clock skew (> 7 days) is penalised.
+* **Admission limits** — every connection is admitted *before* the handshake
+  and is refused with a closed socket when it would exceed: the
+  `MAX_PEERS` ceiling (64), the inbound cap (`MAX_PEERS` −
+  `RESERVED_OUTBOUND_SLOTS`, so a flood of inbound sockets can never stop the
+  node from dialling the peers it needs), or `MAX_PEERS_PER_IP` (4) inbound
+  connections from one address. Refusing early means a connection flood costs
+  one accept and one close instead of a socket, a writer task and a frame
+  buffer each.
+* **Header batches must be rooted and contiguous.** A `headers` message is
+  only used for block requests when the first header extends a block we
+  already hold, every later header extends its predecessor at the next
+  height, and every header satisfies its own proof of work; otherwise the
+  peer is scored and disconnected. The peer's advertised height comes from
+  the chain it just proved it has, not from the number of unseen headers it
+  sent. Without those rules an unsolicited `headers` frame could aim the sync
+  driver at an arbitrary chain and keep the node permanently "syncing".
 * **IBD** — headers-first with a sparse block locator (last 11 hashes, then
   exponentially sparser) and a continuous sync driver with stall detection:
   blocks requested but not delivered within 30 s are re-requested. Block
@@ -322,6 +338,16 @@ Transport rules:
 * **Auth failures** drain the body and answer `401` with
   `Connection: close`; a malformed or non-ASCII `Authorization` header is
   treated as a failed authentication rather than an exception.
+* **The listener is exclusive on Windows.** `http.server.HTTPServer` binds
+  with `SO_REUSEADDR`, which on Windows means "other processes may bind this
+  address too" rather than POSIX's "reuse a TIME_WAIT address": a second
+  local process could take the RPC port and impersonate the node, answering
+  the operator's `stop` / `startminer` / `sendrawtransaction` calls while the
+  real node stopped serving. Qeuph binds `SO_EXCLUSIVEADDRUSE` on Windows
+  (same for the P2P and web listeners, via `qeuph.network.listen`) and keeps
+  the stdlib behaviour everywhere else. "Port in use" is detected on every
+  platform (`EADDRINUSE` 98/100, `WSAEADDRINUSE` 10048, `WSAENOPORT` 10049,
+  `WSAEACCES` 10013); the daemon then says exactly which port to change.
 
 Block generation (`generate`, regtest/testnet only) is scheduled on the
 node's event loop so RPC threads never race consensus state; the

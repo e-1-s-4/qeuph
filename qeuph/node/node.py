@@ -30,12 +30,14 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from qeuph import constants as C
 from qeuph.config import Network
+from qeuph.core import pow as pow_mod
 from qeuph.core.block import Block, BlockHeader
 from qeuph.core.chain import ChainManager
 from qeuph.core.mempool import Mempool
 from qeuph.core.tx import Transaction
 from qeuph.core.validation import BlockValidationError, TxValidationError
 from qeuph.network.protocol import FrameReader, encode_frame
+from qeuph.network.listen import listener_socket
 
 logger = logging.getLogger("qeuph.node")
 
@@ -91,6 +93,12 @@ class Peer:
         self.announce_pending: bool = False
 
     # ------------------------------------------------------------------
+    @property
+    def ip(self) -> str:
+        """Remote IP (empty when the transport does not report a peer)."""
+        hp = self.host_port
+        return hp[0] if hp else ""
+
     @property
     def addr(self) -> str:
         peer = self.writer.get_extra_info("peername")
@@ -236,11 +244,22 @@ class QNode:
     # ------------------------------------------------------------------
     async def start(self):
         if self.bind_host is not None:
+            sock = None
             try:
+                # The socket is created here (instead of
+                # reuse_address=True) so Windows gets SO_EXCLUSIVEADDRUSE:
+                # with SO_REUSEADDR another local process could bind the P2P
+                # port too and quietly take the node's place in the network.
+                sock = listener_socket(self.bind_host, self.network.p2p_port)
                 self.server = await asyncio.start_server(
-                    self._handle_connection, self.bind_host,
-                    self.network.p2p_port, reuse_address=True, backlog=64)
+                    self._handle_connection, sock=sock, backlog=64)
+                sock = None            # start_server owns it now
             except OSError as e:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
                 if self.strict_listen:
                     raise
                 self.listen_failed = (
@@ -378,6 +397,40 @@ class QNode:
     # ------------------------------------------------------------------
     # connection handling
     # ------------------------------------------------------------------
+    @staticmethod
+    def _close_writer(writer) -> None:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+    def _refuse_connection(self, ip: str, inbound: bool) -> Optional[str]:
+        """None when a new connection may be served, else the refusal reason.
+
+        The ceiling is enforced BEFORE the handshake, so a connection flood
+        costs one accept plus one close instead of a Peer object, a writer
+        task and up to MAX_FRAME_BUFFER of buffered bytes per socket.
+
+        Outbound slots are reserved: with the per-IP cap alone, 16 distinct
+        hosts could hold every one of MAX_PEERS slots and the node would be
+        unable to dial the peers it needs to sync from (a cheap eclipse).
+        """
+        if len(self.peers) >= self.max_peers:
+            return f"peer limit reached ({self.max_peers})"
+        if not inbound:
+            return None
+        inbound_count = sum(1 for p in self.peers if p.inbound)
+        cap = max(1, self.max_peers - C.RESERVED_OUTBOUND_SLOTS)
+        if inbound_count >= cap:
+            return (f"inbound limit reached ({cap}); "
+                    f"{C.RESERVED_OUTBOUND_SLOTS} slots reserved for outbound")
+        if ip:
+            same_ip = sum(1 for p in self.peers if p.inbound and p.ip == ip)
+            if same_ip >= C.MAX_PEERS_PER_IP:
+                return (f"per-IP inbound limit reached "
+                        f"({C.MAX_PEERS_PER_IP} connections from {ip})")
+        return None
+
     async def _connect_peer(self, host: str, port: int):
         """Dial a peer and then SERVE it for the life of the connection.
 
@@ -410,14 +463,19 @@ class QNode:
     async def _handle_connection(self, reader: asyncio.StreamReader,
                                  writer: asyncio.StreamWriter,
                                  inbound: bool = True):
-        peer = Peer(reader, writer, self, inbound)
         peername = writer.get_extra_info("peername")
-        if peername and self.is_banned(f"{peername[0]}:{peername[1]}"):
-            try:
-                writer.close()
-            except Exception:
-                pass
+        ip = peername[0] if peername else ""
+        if peername and self.is_banned(f"{ip}:{peername[1]}"):
+            self._close_writer(writer)
             return
+        refusal = self._refuse_connection(ip, inbound)
+        if refusal:
+            logger.debug("refusing %s connection from %s: %s",
+                         "inbound" if inbound else "outbound",
+                         ip or "?", refusal)
+            self._close_writer(writer)
+            return
+        peer = Peer(reader, writer, self, inbound)
         self.peers.append(peer)
         self.stats["peers_connected"] += 1
         peer.writer_task = asyncio.ensure_future(peer._writer_loop())
@@ -820,20 +878,61 @@ class QNode:
             sent += 1
 
     async def _on_headers(self, peer: Peer, payload: dict):
-        """Request the bodies of unknown headers, in bounded batches."""
-        wanted = []
-        for hh in (payload.get("headers") or [])[:C.MAX_HEADERS]:
+        """Request the bodies of unknown headers, in bounded batches.
+
+        The batch must be a CONTIGUOUS chain anchored in a block we already
+        have: the first header has to extend a known block and every later
+        header has to extend its predecessor, at the next height, with a
+        valid proof of work.  Without those checks an unsolicited `headers`
+        message could aim the sync driver at an arbitrary chain and inflate
+        the peer's advertised height, turning every frame into a getdata
+        round for blocks that can never connect.  An honest peer always
+        passes: `_on_getheaders` serves exactly this shape.
+        """
+        raw = (payload.get("headers") or [])[:C.MAX_HEADERS]
+        wanted: List[bytes] = []
+        prev_hash: Optional[bytes] = None
+        prev_height: Optional[int] = None
+        for hh in raw:
             try:
                 hdr = BlockHeader.deserialize(bytes.fromhex(hh))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
+                peer.penalise(5, "malformed header")
+                raise PeerMisbehaved("malformed header in headers message")
+            if prev_hash is None:
+                parent = self.chain.get_block(hdr.prev_hash)
+                if parent is None or hdr.height != parent.height + 1:
+                    peer.penalise(C.BAN_SCORE_THRESHOLD // 2,
+                                  "headers do not extend a known block")
+                    raise PeerMisbehaved(
+                        "header batch does not extend a known block")
+            elif hdr.prev_hash != prev_hash or hdr.height != prev_height + 1:
+                peer.penalise(C.BAN_SCORE_THRESHOLD // 2,
+                              "headers are not a contiguous chain")
+                raise PeerMisbehaved("header batch is not contiguous")
+            try:
+                if not pow_mod.check_pow(hdr.serialize(), hdr.bits):
+                    peer.penalise(C.BAN_SCORE_THRESHOLD,
+                                  "header fails its own PoW")
+                    raise PeerMisbehaved("header with invalid proof of work")
+            except ValueError:
+                peer.penalise(C.BAN_SCORE_THRESHOLD,
+                              "header with a malformed target")
+                raise PeerMisbehaved("header with malformed compact target")
+            # BlockHeader.hash is a method (Block.hash is a property)
+            prev_hash = hdr.hash()
+            prev_height = hdr.height
+            if self.chain.store is not None and \
+                    self.chain.store.block_exists(prev_hash):
                 continue
-            # BlockHeader.hash is a method (Block.hash is the property)
-            bh = hdr.hash()
-            if self.chain.store is None or not self.chain.store.block_exists(bh):
-                if bh in self._requested:
-                    continue
-                wanted.append(bh)
+            if prev_hash in self._requested:
+                continue
+            wanted.append(prev_hash)
         self._note_sync_progress()
+        if prev_height is not None:
+            # the peer's real height, taken from the chain it just proved it
+            # has, instead of the inflated hop-count guess used before
+            peer.best_height = max(peer.best_height, prev_height)
         if not wanted:
             if self.chain.height() >= max((p.best_height for p in self.peers),
                                            default=0):
@@ -844,11 +943,9 @@ class QNode:
         for h in batch:
             self._requested[h] = now
             peer.requested.add(h)
-        peer.best_height = max(peer.best_height,
-                               self.chain.height() + len(wanted))
         peer.try_send("getdata", {"blocks": [h.hex() for h in batch]})
-        if len(wanted) > len(batch):
-            # queue the rest by asking for more headers from the same point
+        if len(wanted) > len(batch) or len(raw) >= C.MAX_HEADERS:
+            # more headers are waiting: keep the walk going from our tip
             peer.try_send("getheaders", {"locator": self._locator(),
                                          "height": self.chain.height()})
 

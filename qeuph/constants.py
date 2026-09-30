@@ -110,6 +110,14 @@ BAN_SCORE_DECAY = 1.0                    # points decayed per second
 BAN_DURATION = 24 * 3600                 # seconds a peer stays banned
 MAX_BANNED = 4096                        # bounded ban table
 MAX_PEERS = 64                           # inbound+outbound connection ceiling
+# Inbound connections accepted from a single remote IP.  Without a per-IP
+# cap one host can open every slot in MAX_PEERS (each connection costs a
+# socket, a writer task and up to MAX_FRAME_BUFFER of buffered bytes), which
+# is both a memory-exhaustion vector and a trivial eclipse of the node.
+MAX_PEERS_PER_IP = 4
+# Slots reserved for OUTBOUND dials so a flood of inbound connections can
+# never leave the node unable to reach the network it is trying to sync.
+RESERVED_OUTBOUND_SLOTS = 8
 
 # Signature sizes (ML-DSA-87) - used for sanity checks
 MLDSA_PK_SIZE = 2592

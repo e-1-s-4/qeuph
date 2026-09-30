@@ -66,6 +66,7 @@ from qeuph.core.chain import ChainManager
 from qeuph.core.mempool import Mempool
 from qeuph.crypto import address as addr_mod
 from qeuph.crypto import ml_dsa
+from qeuph.network.listen import make_http_server, port_busy
 from qeuph.network.rpc import RPCService
 from qeuph.node.node import QNode
 from qeuph.services.miner import SoloMiner
@@ -1587,7 +1588,7 @@ def _has_flag(argv, flag: str) -> bool:
 # `mine` is excluded for the same reason as the miner routes: it is an
 # unbounded CPU/thread burner reachable without a flag.
 ALLOWED_CLI_CMDS = {"chain", "genesis", "emission",
-                    "address", "crypto", "version"}
+                    "address", "crypto", "version", "preflight"}
 # `chain truncate` and `chain reindex` rewrite or destroy the embedded
 # node's database, which is a node-state mutation rather than a command the
 # browser should be able to drive; the read-only `chain` verbs are allowed
@@ -1669,8 +1670,14 @@ def serve(host: str = C.DEFAULT_WEB_HOST, port: int = C.DEFAULT_WEB_PORT,
     NODE = NodeManager(network, data_root=data_root, start_node=start_node,
                        port_offset=port_offset, connect_peers=connect_peers,
                        p2p_host=p2p_host)
-    httpd = ThreadingHTTPServer((host, port), QeuphHttpHandler)
-    httpd.daemon_threads = True
+    try:
+        httpd = make_http_server(host, port, QeuphHttpHandler, name="web")
+    except OSError as e:
+        if port_busy(e):
+            raise SystemExit(
+                f"web port {port} on {host} is already in use - pass "
+                f"--port to pick another one, or stop the process holding it")
+        raise
     bar = "=" * 64
     print(bar)
     print(" Qeuph (QUH) node suite")

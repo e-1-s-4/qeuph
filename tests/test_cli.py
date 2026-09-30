@@ -380,7 +380,7 @@ class TestWebCliMirror:
         tree = cli_tree()
         assert set(tree["subcommands"]) == {
             "node", "mine", "wallet", "chain", "rpc", "genesis", "emission",
-            "address", "crypto", "web", "version"}
+            "address", "crypto", "web", "version", "preflight"}
         # the browser console reads the same option list the CLI parses
         opts = _subcommand_options(["node"])
         assert "--network" in opts and "--rpc-user" in opts
@@ -394,7 +394,8 @@ class TestWebCliMirror:
                                        ALLOWED_WALLET_CMDS,
                                        ALLOWED_WALLET_SUBCOMMANDS)
         assert ALLOWED_CLI_CMDS >= {"chain", "genesis", "emission",
-                                    "address", "crypto", "version"}
+                                    "address", "crypto", "version",
+                                    "preflight"}
         assert ALLOWED_WALLET_CMDS == {"wallet"}
         # a browser must never be able to start a daemon or nest a web server
         assert "node" not in ALLOWED_CLI_CMDS

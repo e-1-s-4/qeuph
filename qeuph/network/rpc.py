@@ -54,6 +54,7 @@ from qeuph import constants as C
 from qeuph.core.block import Block
 from qeuph.core.tx import Transaction
 from qeuph.core.validation import TxValidationError
+from qeuph.network.listen import make_http_server, port_busy
 
 logger = logging.getLogger("qeuph.rpc")
 
@@ -100,6 +101,7 @@ class RpcError(Exception):
     def __init__(self, code: int, message: str):
         super().__init__(message)
         self.code = code
+
 
 
 class RPCService:
@@ -403,15 +405,20 @@ class RPCService:
                               "params": params})
 
         try:
-            self._server = ThreadingHTTPServer((self.host, self.port), Handler)
+            self._server = make_http_server(self.host, self.port, Handler,
+                                            name="json-rpc")
         except OSError as e:
-            if getattr(e, "errno", None) == 98:
-                # If preferred port is occupied (e.g. by another process or test runner),
-                # allocate an ephemeral port.
-                self._server = ThreadingHTTPServer((self.host, 0), Handler)
-                self.port = self._server.server_address[1]
-            else:
+            if not port_busy(e):
                 raise
+            # The preferred port is occupied (another process, or a test
+            # runner on a fixed port): allocate an ephemeral one instead.  The
+            # warning is the point - a daemon that quietly answers somewhere
+            # else than the operator asked for is worse than one that says so.
+            logger.warning("json-rpc port %d is in use; listening on an "
+                           "ephemeral port instead", self.port)
+            self._server = make_http_server(self.host, 0, Handler,
+                                            name="json-rpc")
+            self.port = self._server.server_address[1]
         self._server.daemon_threads = True
         t = threading.Thread(target=self._server.serve_forever, daemon=True,
                              name="qeuph-rpc")

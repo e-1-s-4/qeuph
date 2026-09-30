@@ -187,20 +187,36 @@ class WebNode:
 
     @staticmethod
     def _pick_offset(network):
-        """A port offset whose derived P2P port is actually free.
+        """A port offset whose derived P2P and RPC ports are actually free.
 
-        The embedded node derives its ports from the network profile (base +
-        1000/2000); a fixed derivation collides with any leftover node on
-        the host, so each run claims a port first and works the offset back
-        from it.
+        The embedded node derives its ports from the network profile
+        (base + 1000/2000, then + offset).  Claiming a port from the OS and
+        working the offset back from it is the robust way to do that - but
+        Windows hands out high ephemeral ports (49k+), so the derived offset
+        can land far above the 1..20000 window this used to require.  Every
+        attempt then "failed" on a perfectly healthy host and the testnet
+        section of this check aborted before it ran.  Both derived ports are
+        now verified with the same socket options the node itself binds with.
         """
+        from qeuph.network.listen import listener_socket
         base = {"mainnet": 0, "testnet": 1000, "regtest": 2000}[network]
         base_port = {"mainnet": C.DEFAULT_P2P_PORT,
                      "testnet": 29090, "regtest": 39090}[network]
+        rpc_base = base_port + 1
+
+        def free(p):
+            try:
+                listener_socket("127.0.0.1", p).close()
+                return True
+            except OSError:
+                return False
+
         for _ in range(64):
             p2p = free_port()
             offset = p2p - base_port - base
-            if 1 <= offset <= 20000:
+            if not (1 <= offset <= 60000):
+                continue
+            if free(p2p) and free(rpc_base + offset):
                 return offset
         raise SystemExit("could not pick a free embedded P2P port")
 

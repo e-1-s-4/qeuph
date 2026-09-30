@@ -45,6 +45,7 @@ rpc
     qeuph rpc METHOD ['{"json": "params"}'] [--url URL] [--user U --password P]
 
 tools
+    qeuph preflight   [--network N] [--connect H:P] [--seed HOST] [--json]
     qeuph genesis     [--network N]
     qeuph emission    [--json]
     qeuph address     {validate|info} ADDR [--network N]
@@ -120,6 +121,24 @@ def build_parser() -> argparse.ArgumentParser:
     mine.add_argument("--data-dir", default=None)
     mine.add_argument("--seconds", type=float, default=10.0)
     mine.add_argument("--threads", type=int, default=1)
+
+    pre = sub.add_parser(
+        "preflight",
+        help="check this build, a network and the local ports for launch "
+             "readiness (starts nothing, mines nothing)")
+    pre.add_argument("--network", default=None,
+                     choices=["mainnet", "testnet", "regtest"])
+    pre.add_argument("--connect", action="append", metavar="HOST:PORT",
+                     help="peer that would be passed to `node --connect`")
+    pre.add_argument("--seed", action="append", metavar="HOST",
+                     help="DNS seed that would be passed to `node --seed`")
+    pre.add_argument("--rpc-host", default=C.DEFAULT_RPC_HOST)
+    pre.add_argument("--rpc-port", type=int, default=None)
+    pre.add_argument("--p2p-port", type=int, default=None)
+    pre.add_argument("--rpc-user", default=None)
+    pre.add_argument("--rpc-password", default=None)
+    pre.add_argument("--data-dir", default=None)
+    pre.add_argument("--json", action="store_true")
 
     # -------------------------------------------------------------- wallet
     wallet = sub.add_parser("wallet", help="wallet operations")
@@ -919,6 +938,37 @@ def cmd_web(args):
           allow_remote=args.allow_remote)
 
 
+def cmd_preflight(args):
+    """Report, without starting anything, whether this build can run.
+
+    Every check is shared with the daemon's own startup warnings, so what an
+    operator sees here is exactly what a `qeuph node` on this machine would
+    report.  Exit code is 0 when there is no `fail` check.
+    """
+    from qeuph.main import FAIL, OK, WARN, parse_peer, preflight_report
+    net = _with_data_dir(_net(args), args.data_dir)
+    peers = [parse_peer(c, net.p2p_port) for c in (args.connect or [])]
+    report = preflight_report(
+        net, connect_peers=peers, seed_hosts=args.seed or [],
+        rpc_host=args.rpc_host, rpc_port=args.rpc_port,
+        p2p_port=args.p2p_port or net.p2p_port, data_dir=net.data_dir,
+        rpc_authenticated=bool(args.rpc_user and args.rpc_password))
+    if args.json:
+        print(json.dumps(report, indent=2))
+        sys.exit(0 if report["ok"] else 1)
+    print(f"{net.name} preflight  (qeuph {C.VERSION}, protocol "
+          f"{C.PROTOCOL_VERSION})")
+    for c in report["checks"]:
+        print(f"  {c['status']:<4} {c['name']:<12} {c['detail']}")
+    counts = {s: sum(1 for c in report["checks"] if c["status"] == s)
+              for s in (OK, WARN, FAIL)}
+    print(f"\n{counts[OK]} ok, {counts[WARN]} warn, {counts[FAIL]} fail")
+    if not report["ok"]:
+        print("this configuration cannot run as shipped: fix the failures "
+              "above before starting a node")
+    sys.exit(0 if report["ok"] else 1)
+
+
 def cmd_version(args):
     from qeuph import __version__
     from qeuph.crypto import ml_dsa
@@ -942,6 +992,7 @@ def main(argv=None):
         "chain": cmd_chain, "rpc": cmd_rpc, "genesis": cmd_genesis,
         "emission": cmd_emission, "address": cmd_address,
         "crypto": cmd_crypto, "web": cmd_web, "version": cmd_version,
+        "preflight": cmd_preflight,
     }
     fn = handlers.get(args.cmd)
     if fn is None:

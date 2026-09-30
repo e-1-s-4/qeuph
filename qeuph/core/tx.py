@@ -191,6 +191,14 @@ class Transaction:
         pubkeys).
         """
         from qeuph.crypto import fips204
+        # One key per input, enforced.  `zip` would silently stop at the
+        # shorter list, leaving the remaining inputs unsigned - a transaction
+        # that every node rejects and that looks signed in every log line.
+        keys = list(keys)
+        if len(keys) != len(self.inputs):
+            raise ValueError(
+                f"sign() needs one key per input ({len(self.inputs)} inputs, "
+                f"{len(keys)} keys given)")
         for idx, (inp, key) in enumerate(zip(self.inputs, keys)):
             if inp.is_coinbase or key is None:
                 continue

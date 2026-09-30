@@ -44,6 +44,247 @@ def setup_logging(verbose: bool = False, logfile: Optional[str] = None):
         handlers=handlers, force=True)
 
 
+# ---------------------------------------------------------------------------
+# Launch readiness ("preflight")
+# ---------------------------------------------------------------------------
+OK = "ok"
+WARN = "warn"
+FAIL = "fail"
+
+
+def _add(report: dict, name: str, status: str, detail: str) -> str:
+    report["checks"].append({"name": name, "status": status,
+                             "detail": detail})
+    return status
+
+
+def _port_free(host: str, port: int) -> bool:
+    """True when nothing owns `host:port` yet.
+
+    Uses the same socket options the real listeners use, because a probe that
+    binds with plain SO_REUSEADDR reports "free" on Windows for a port another
+    process already owns - the exact mistake this check exists to catch.
+    """
+    from qeuph.network.listen import listener_socket
+    try:
+        sock = listener_socket(host or "127.0.0.1", int(port))
+        sock.close()
+        return True
+    except (OSError, ValueError, OverflowError):
+        return False
+
+
+def _read_only_meta(db_path: str, keys) -> dict:
+    """Read meta rows out of a stored chain WITHOUT opening it for write.
+
+    Returns {} when the file is missing or is not a usable store, so a
+    half-written or foreign chain.db is reported, never crashed on.
+    """
+    import sqlite3
+    from pathlib import Path
+    if not os.path.isfile(db_path):
+        return {}
+    uri = Path(db_path).absolute().as_uri() + "?mode=ro"
+    try:
+        con = sqlite3.connect(uri, uri=True, timeout=2.0)
+    except sqlite3.Error:
+        return {}
+    try:
+        out = {}
+        for key in keys:
+            row = con.execute("SELECT value FROM meta WHERE key=?",
+                              (key,)).fetchone()
+            out[key] = row[0] if row else None
+        row = con.execute(
+            "SELECT hash FROM main_chain WHERE height=0").fetchone()
+        out["genesis"] = row[0] if row else None
+        return out
+    except sqlite3.Error:
+        return {}
+    finally:
+        con.close()
+
+
+def _genesis_check(report: dict, network: Network) -> None:
+    from qeuph.core import genesis as genesis_mod
+    from qeuph.config import checkpoint_for
+    try:
+        g = genesis_mod.build_genesis(network)
+    except Exception as e:                      # pragma: no cover - defensive
+        _add(report, "genesis", FAIL, f"cannot build genesis: {e}")
+        return
+    if not g.header.meets_target():
+        _add(report, "genesis", FAIL,
+             "genesis block does not satisfy its own proof-of-work target")
+        return
+    if not genesis_mod.validate_genesis(g, network):
+        _add(report, "genesis", FAIL,
+             "genesis block fails its own validation rules")
+        return
+    pinned = checkpoint_for(network, 0)
+    if pinned is not None and pinned != g.hash:
+        _add(report, "genesis", FAIL,
+             f"genesis hash {g.hash.hex()[:32]}... does not match the pinned "
+             f"checkpoint {pinned.hex()[:32]}...")
+        return
+    _add(report, "genesis", OK,
+         f"{g.hash.hex()[:32]}... (height 0, nonce {g.header.nonce})")
+
+
+def _crypto_check(report: dict, network: Network) -> None:
+    from qeuph.core import pow as pow_mod
+    from qeuph.crypto import address as addr_mod
+    from qeuph.crypto import ml_dsa
+    try:
+        seed, pk, sk = ml_dsa.generate_keypair()
+        msg = b"qeuph preflight"
+        sig = ml_dsa.sign_with_seed(seed, msg)
+        if not (ml_dsa.verify(pk, msg, sig)
+                and not ml_dsa.verify(pk, msg + b"!", sig)):
+            raise RuntimeError("ML-DSA-87 sign/verify self-test failed")
+        addr = addr_mod.pk_to_address(pk, network.hrp)
+        if not addr.startswith(network.hrp + "1") or \
+                addr_mod.address_to_hash(addr, network.hrp) is None:
+            raise RuntimeError("address encode/decode self-test failed")
+    except Exception as e:
+        _add(report, "crypto", FAIL, f"self-test failed: {e}")
+        return
+    _add(report, "crypto", OK,
+         f"ML-DSA-87 via {ml_dsa.backend_name()}; signature "
+         f"{ml_dsa.SIG_SIZE} B, address {len(addr)} chars")
+    try:
+        pow_mod.bits_to_target(network.genesis_bits)
+        _add(report, "pow", OK,
+             f"compact target {hex(network.genesis_bits)} decodes")
+    except ValueError as e:
+        _add(report, "pow", FAIL, f"genesis bits do not decode: {e}")
+
+
+def preflight_report(network: Network, *, connect_peers=None,
+                     seed_hosts=None, rpc_host: Optional[str] = None,
+                     rpc_port: Optional[int] = None,
+                     p2p_port: Optional[int] = None,
+                     data_dir: Optional[str] = None,
+                     rpc_authenticated: bool = False) -> dict:
+    """Readiness report for launching `network`; starts nothing, mines none.
+
+    Returns {"network", "checks": [{name, status, detail}], "ok", "warnings"}
+    with status one of "ok" / "warn" / "fail".  "fail" means this build or
+    configuration cannot work as shipped; "warn" means it works but the
+    operator must know something.  `qeuph preflight` prints it and the daemon
+    logs the non-ok lines at startup, so the two can never disagree.
+    """
+    from qeuph.config import bootstrap_nodes, dns_seeds
+    from qeuph.core import genesis as genesis_mod
+    from qeuph.core import reward as reward_mod
+    report: dict = {"network": network.name, "checks": []}
+    _add(report, "build", OK,
+         f"qeuph {C.VERSION}, protocol {C.PROTOCOL_VERSION}, "
+         f"{network.name} (p2p {p2p_port or network.p2p_port}, "
+         f"rpc {rpc_port or network.rpc_port})")
+    _genesis_check(report, network)
+    _crypto_check(report, network)
+
+    emitted = reward_mod.exact_total_emission()
+    if 0 < emitted <= C.MAX_SUPPLY:
+        _add(report, "emission", OK,
+             f"{emitted / C.QUPHI_PER_QUH:,.4f} QUH over "
+             f"{reward_mod.epoch_count()} epochs "
+             f"({(C.MAX_SUPPLY - emitted) / C.QUPHI_PER_QUH:.4f} QUH below "
+             f"the {C.MAX_SUPPLY_QUH:,} QUH cap)")
+    else:
+        _add(report, "emission", FAIL,
+             f"emission {emitted} is outside 0..{C.MAX_SUPPLY}")
+
+    target_dir = data_dir or network.data_dir
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        probe = os.path.join(target_dir, ".qeuph-preflight")
+        with open(probe, "wb") as fh:
+            fh.write(b"qeuph")
+        os.remove(probe)
+        _add(report, "data dir", OK, f"{target_dir} is writable")
+    except OSError as e:
+        _add(report, "data dir", FAIL, f"{target_dir} is not writable: {e}")
+
+    db_path = os.path.join(target_dir, "chain.db")
+    meta = _read_only_meta(db_path, ("tip", "tip_height"))
+    if not meta:
+        _add(report, "chain store", OK,
+             "no chain.db yet (a fresh data directory is created on start)")
+    else:
+        height = int.from_bytes(meta.get("tip_height") or b"", "little") \
+            if meta.get("tip_height") else 0
+        tip = (meta.get("tip") or b"").hex()
+        stored_genesis = meta.get("genesis")
+        expected = genesis_mod.build_genesis(network).hash
+        if stored_genesis is not None and stored_genesis != expected:
+            _add(report, "chain store", FAIL,
+                 f"{db_path} holds a DIFFERENT chain (genesis "
+                 f"{stored_genesis.hex()[:32]}... != {expected.hex()[:32]}...)")
+        else:
+            _add(report, "chain store", OK,
+                 f"{db_path} at height {height} (tip {tip[:32]}...)")
+
+    for label, host, port in (
+            ("p2p port", "0.0.0.0", p2p_port or network.p2p_port),
+            ("rpc port", rpc_host or C.DEFAULT_RPC_HOST,
+             rpc_port or network.rpc_port)):
+        if _port_free(host, port):
+            _add(report, label, OK, f"{host}:{port} is free")
+        else:
+            _add(report, label, WARN,
+                 f"{host}:{port} is already in use (another node running?)")
+
+    peers = list(connect_peers or []) + list(bootstrap_nodes(network))
+    seeds = list(seed_hosts or []) + list(dns_seeds(network))
+    if peers or seeds:
+        _add(report, "peers", OK,
+             f"{len(peers)} bootstrap peer(s), {len(seeds)} DNS seed(s)")
+    else:
+        _add(report, "peers", WARN,
+             "no bootstrap peers and no DNS seeds configured: this node "
+             "cannot find the network on its own. Pass --connect host:port "
+             "or --seed host, or set qeuph.constants.BOOTSTRAP_NODES_"
+             f"{network.name.upper()} / DNS_SEEDS_{network.name.upper()}")
+
+    if network.is_mainnet:
+        if len(network.checkpoints) <= 1:
+            _add(report, "checkpoints", WARN,
+                 f"only the genesis checkpoint is pinned "
+                 f"({len(network.checkpoints)}); add periodic block "
+                 f"checkpoints to CHECKPOINTS before launch")
+        else:
+            _add(report, "checkpoints", OK,
+                 f"{len(network.checkpoints)} checkpoints pinned")
+        if time.time() < C.MAINNET_LAUNCH_TIMESTAMP:
+            _add(report, "launch", WARN,
+                 "mainnet is not live yet (launch "
+                 + time.strftime("%Y-%m-%d %H:%M:%S UTC",
+                                 time.gmtime(C.MAINNET_LAUNCH_TIMESTAMP))
+                 + ")")
+        else:
+            _add(report, "launch", OK, "mainnet launch time has passed")
+        if rpc_host and rpc_host not in ("127.0.0.1", "::1", "localhost") \
+                and not rpc_authenticated:
+            _add(report, "rpc auth", WARN,
+                 f"RPC is bound to {rpc_host} without --rpc-user/"
+                 f"--rpc-password: that is unauthenticated full node control")
+        else:
+            _add(report, "rpc auth", OK,
+                 "RPC is loopback-only or password protected")
+    else:
+        _add(report, "economics", WARN,
+             f"{network.name} carries no economic value; use it for testing")
+
+    report["warnings"] = [f"{c['name']}: {c['detail']}"
+                          for c in report["checks"] if c["status"] != OK]
+    report["ok"] = not any(c["status"] == FAIL for c in report["checks"])
+    return report
+
+
+
+
 class Daemon:
     def __init__(self, network: Optional[Network] = None,
                  mine_to: Optional[str] = None,
@@ -84,39 +325,23 @@ class Daemon:
     # ------------------------------------------------------------------
     def preflight(self) -> List[str]:
         """Consistency checks run before the listeners come up.  Returns a
-        list of human-readable warnings (empty when everything is fine)."""
-        warnings: List[str] = []
-        g = self.chain.genesis
-        if self.network.is_mainnet and g.hash != C.CHECKPOINTS.get(0):
-            warnings.append(
-                "mainnet genesis hash does not match the pinned checkpoint - "
-                "the build is inconsistent with the released chain identity")
-        if not self.chain.genesis.header.meets_target():
-            warnings.append("genesis block does not satisfy its own PoW target")
-        if self.network.is_mainnet and \
-                time.time() < C.MAINNET_LAUNCH_TIMESTAMP:
-            warnings.append(
-                f"mainnet is not live yet "
-                f"(launch {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(C.MAINNET_LAUNCH_TIMESTAMP))})")
-        if not os.path.isdir(self.network.data_dir):
-            warnings.append(f"data directory {self.network.data_dir} is missing")
-        if not self.node.connect_peers and not self.node.seed_hosts:
-            if self.network.is_mainnet:
-                warnings.append(
-                    "no bootstrap peers and no DNS seeds configured: this node "
-                    "cannot find the network on its own. Pass --connect "
-                    "host:port, or --seed host, or set "
-                    "qeuph.constants.BOOTSTRAP_NODES_MAINNET / "
-                    "DNS_SEEDS_MAINNET before mainnet launch")
-            else:
-                warnings.append(
-                    "no bootstrap peers and no DNS seeds configured: peers must "
-                    "be supplied with --connect host:port or --seed host")
-        if self.network.is_regtest:
-            warnings.append("regtest: instant mining, no economic value")
-        if self.network.is_testnet:
-            warnings.append("testnet: no economic value")
-        return warnings
+        list of human-readable warnings (empty when everything is fine).
+
+        The checks themselves live in `preflight_report`, which is also what
+        `qeuph preflight` prints, so the daemon's startup warnings and the
+        operator-facing report can never disagree.  Only the facts the daemon
+        owns (its ports, its peer list, its RPC host) are added here.
+        """
+        report = preflight_report(
+            self.network,
+            connect_peers=self.node.connect_peers,
+            seed_hosts=self.node.seed_hosts,
+            rpc_host=self.rpc.host,
+            rpc_port=self.rpc.port,
+            p2p_port=self.network.p2p_port,
+            data_dir=self.network.data_dir,
+            rpc_authenticated=self.rpc.auth_required)
+        return list(report["warnings"])
 
     async def run(self):
         loop = asyncio.get_running_loop()
@@ -209,5 +434,18 @@ def run_daemon(network_name=None, mine_to: Optional[str] = None,
                miner_threads=miner_threads, p2p_host=p2p_host)
     try:
         asyncio.run(d.run())
+    except OSError as e:
+        from qeuph.network.listen import port_busy
+        if port_busy(e):
+            # The listeners bind exclusively on Windows and a busy port is
+            # the one startup failure an operator hits routinely; say exactly
+            # which port and what to do instead of a traceback.
+            logger.error("could not bind %s:%d (%s)", net.p2p_port,
+                         net.rpc_port, e)
+            raise SystemExit(
+                f"a port Qeuph needs is already in use ({e}). Pass "
+                f"--p2p-port/--rpc-port to choose free ports, or stop the "
+                f"other node.")
+        raise
     except KeyboardInterrupt:
         pass

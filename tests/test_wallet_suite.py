@@ -214,10 +214,32 @@ class TestKeystore:
             keystore.load_wallet(str(tmp_path / "nope.json"), None)
 
     def test_iteration_override_env(self, tmp_path, monkeypatch):
+        # Raising the work factor is the documented use and must pass through.
+        monkeypatch.setenv("QEUPH_WALLET_KDF_ITERATIONS", "900000")
+        assert keystore.kdf_iterations() == 900_000
+        # Lowering it is clamped to the floor the loader accepts: an override
+        # of 1000 used to write a file declaring 1000 iterations, which
+        # load_wallet then refused as "implausible" - the seed could not be
+        # recovered from its own wallet, ever.
         monkeypatch.setenv("QEUPH_WALLET_KDF_ITERATIONS", "1000")
-        assert keystore.kdf_iterations() == 1000
+        assert keystore.kdf_iterations() == keystore.KDF_ITERATIONS_V1
         monkeypatch.setenv("QEUPH_WALLET_KDF_ITERATIONS", "not-a-number")
         assert keystore.kdf_iterations() == keystore.KDF_ITERATIONS
+
+    def test_any_accepted_override_round_trips(self, tmp_path, monkeypatch):
+        """Whatever the operator sets, the file we write must open again."""
+        p = str(tmp_path / "w.json")
+        # every value is clamped into the range load_wallet accepts, so the
+        # seed is always recoverable; the 600k default itself is covered by the
+        # round-trip tests above (a full-strength run costs seconds of PBKDF2).
+        for value in ("1000", "60000", "61000", "0", "-5", "1e9"):
+            monkeypatch.setenv("QEUPH_WALLET_KDF_ITERATIONS", value)
+            seed = bytes(32)
+            keystore.save_wallet(p, seed, "pw", network="regtest")
+            stored = json.load(open(p))["kdf"]["iterations"]
+            assert keystore.KDF_ITERATIONS_V1 <= stored <= \
+                keystore.MAX_KDF_ITERATIONS, (value, stored)
+            assert keystore.load_wallet(p, "pw") == seed, value
 
 
 class TestWalletFile:

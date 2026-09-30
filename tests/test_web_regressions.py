@@ -96,6 +96,11 @@ class TestMainnetMiningIsRefused:
         `rpc --url` is an arbitrary outbound URL (SSRF)."""
         assert "rpc" not in ALLOWED_CLI_CMDS
         assert "mine" not in ALLOWED_CLI_CMDS
+        # `preflight` is reachable over HTTP: it only reads local state
+        # (genesis, ports, data dir, peers) and never touches a wallet, a
+        # daemon or the database, which is exactly what the UI's readiness
+        # panel needs.
+        assert "preflight" in ALLOWED_CLI_CMDS
         assert "truncate" not in ALLOWED_CHAIN_SUBCOMMANDS
         assert "reindex" not in ALLOWED_CHAIN_SUBCOMMANDS
         for verb in ("sign", "passwd", "backup", "restore", "mnemonic"):

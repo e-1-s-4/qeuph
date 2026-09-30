@@ -106,6 +106,27 @@ python3 -m qeuph.cli.main chain verify                # re-validate every block
 python3 -m qeuph.cli.main emission                    # the two-thirding schedule
 ```
 
+### Check a build before you launch it
+
+```bash
+python3 -m qeuph.cli.main preflight --network mainnet
+python3 -m qeuph.cli.main preflight --network testnet --json
+```
+
+`preflight` starts nothing, mines nothing and touches no wallet: it rebuilds
+the genesis block and compares it with the pinned mainnet checkpoint, runs a
+live ML-DSA-87 sign/verify/tamper self-test, re-derives the total emission
+against the 31.5M cap, probes the data directory and both ports, looks for a
+foreign `chain.db`, and reports whether any peers or DNS seeds are configured
+(or whether only the genesis checkpoint is pinned, or mainnet has not launched
+yet). Every check prints as `ok` / `warn` / `fail`; the exit code is non-zero
+if anything failed.
+
+The same checks run at daemon start-up and are logged as warnings, so what
+`preflight` prints is exactly what `qeuph node` will say on this machine.
+It is also reachable from the web console (`POST /api/cli` with
+`preflight`), because it reads only local state.
+
 ---
 
 ## The web UI
@@ -204,7 +225,7 @@ cannot reach the dangerous verbs even indirectly:
 
 | route | allowed |
 |---|---|
-| `POST /api/cli` | `chain info\|blocks\|block\|tx\|verify`, `genesis`, `emission`, `address`, `crypto`, `version` |
+| `POST /api/cli` | `chain info\|blocks\|block\|tx\|verify`, `genesis`, `emission`, `address`, `crypto`, `version`, `preflight` |
 | `POST /api/wallet` | `show`, `balance`, `addresses`, `newaddress`, `send`, `sweep`, `verify`, `utxos`, `create` |
 
 `rpc` is excluded because its `--url` is an arbitrary outbound URL (the
@@ -448,7 +469,23 @@ pip install -e ".[dev]"
 python3 -m pytest tests/ -q
 ```
 
-427 tests, no network access required, ~180 s. Coverage:
+458 tests, no network access required, ~180 s. Coverage:
+
+* **Launch readiness** (`test_preflight.py`) — the shared report behind
+  `qeuph preflight`: genesis/checkpoint identity on all three networks, the
+  live ML-DSA-87 self-test, emission against the cap, data-directory and port
+  probes, foreign-`chain.db` detection, the peer/checkpoint/launch warnings,
+  the CLI's exit codes, and the invariant that the daemon's start-up warnings
+  are exactly that report.
+* **Listener exclusivity** (`test_port_exclusivity.py`) — the RPC, web and P2P
+  listeners cannot be taken over by a second local process on Windows (the
+  stdlib's `SO_REUSEADDR` binding can, which is the point), and "port in use"
+  is recognised on every platform's errno.
+* **P2P admission** (`test_p2p_limits.py`) — the peer ceiling, the per-IP
+  inbound cap and the reserved outbound slots are enforced *before* the
+  handshake (including against a real connection flood), and a `headers` batch
+  is only used when it is rooted in a block we hold, contiguous, and valid
+  under its own proof of work.
 
 * **Whitepaper conformance** (`test_whitepaper.py`) — the pinned genesis
   hash, every Appendix A parameter, the Table 5 emission values, the
@@ -516,6 +553,9 @@ python3 tools/web_smoke.py          # web suite: HTTP routes, CLI mirror, mine+s
 python3 tools/e2e_check.py          # two regtest daemons, P2P sync, send, reindex, auth
 python3 tools/e2e_three_nodes.py    # 3 CLI nodes + web UI node mesh, both directions,
                                     # remote-attach UI, regtest AND testnet profiles
+python3 tools/network_check.py      # a real daemon per network: mainnet, testnet,
+                                    # regtest - genesis, RPC surface, mining where
+                                    # possible, preflight, clean RPC shutdown
 python3 tools/wp_conformance.py     # every value the whitepaper pins, vs this build
 ```
 
@@ -612,6 +652,28 @@ python3 tools/wp_conformance.py     # every value the whitepaper pins, vs this b
   and neither exposes a mutating method over `GET`. The web API additionally
   refuses to arm a solo miner on mainnet and keeps key-material and
   database-rewriting subcommands off HTTP entirely.
+* **Peer admission is bounded before the handshake**: at most
+  `MAX_PEERS` (64) connections in total, at most `MAX_PEERS_PER_IP` (4)
+  inbound ones per remote address, and `RESERVED_OUTBOUND_SLOTS` slots kept
+  for outbound dials so an inbound flood cannot lock the node out of the
+  network it is syncing. A refused connection costs one accept and one close —
+  no Peer object, no writer task, no frame buffer.
+* **Header batches are validated before they are trusted**: a `headers`
+  message must be a contiguous, PoW-valid chain rooted in a block the node
+  already holds, and the peer's advertised height is taken from that chain
+  rather than from the number of headers it sent. Otherwise a single frame
+  could aim the sync driver at an arbitrary chain and pin the node in a
+  permanent "syncing" state.
+* **The listeners are exclusive on Windows.** `SO_REUSEADDR` there permits a
+  second local process to bind the same port, which would let it answer the
+  operator's `stop` / `startminer` / `sendrawtransaction` calls instead of the
+  node; Qeuph binds `SO_EXCLUSIVEADDRUSE` for the P2P, JSON-RPC and web
+  listeners (`qeuph/network/listen.py`) and detects "port in use" on every
+  platform's errno, so a clash is reported with the port to change rather than
+  silently shared or silently relocated.
+* `Transaction.sign` requires exactly one key per input: a shorter list used
+  to be silently truncated by `zip`, producing a transaction that looked
+  signed in every log line and that no node would accept.
 
 ---
 
