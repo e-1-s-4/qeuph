@@ -89,7 +89,7 @@ STATIC_DIRS = [
 # cwd containing an index.html would serve it from the trusted loopback
 # origin - and a wallet written to that path by another route would then be
 # reachable at the site root.
-STATIC_FILES = ("index.html", "style.css", "favicon.svg")
+STATIC_FILES = ("index.html", "style.css", "favicon.svg", "app.js")
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +607,8 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
                 return self.serve_static("favicon.svg", "image/svg+xml")
             if path == "/style.css":
                 return self.serve_static("style.css", "text/css")
+            if path == "/app.js":
+                return self.serve_static("app.js", "application/javascript")
             if path == "/api/status":
                 return self.send_json(self.status_view())
             if path == "/api/blocks":
@@ -647,6 +649,9 @@ class QeuphHttpHandler(BaseHTTPRequestHandler):
         except Exception as e:                       # never kill the server
             logger.exception("GET %s failed", path)
             return self.send_error_json(f"internal error: {e}", 500)
+
+    def do_HEAD(self):
+        return self.do_GET()
 
     def do_POST(self):
         parsed = urlparse(self.path)

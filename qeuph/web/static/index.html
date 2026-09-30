@@ -121,6 +121,9 @@
       <button onclick="showTab('rpc')" class="tab-btn px-3 py-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/40" data-tab="rpc">
         💻 JSON-RPC Console
       </button>
+      <button onclick="showTab('mainnet')" class="tab-btn px-3 py-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/40" data-tab="mainnet">
+        🚀 Mainnet Launch
+      </button>
     </div>
   </div>
 
@@ -742,6 +745,194 @@
           </div>
         </div>
       </div>
+    <!-- TAB 8: MAINNET LAUNCH RUNBOOK & OPERATIONS -->
+    <div id="tab-mainnet" class="tab-content hidden space-y-6">
+
+      <!-- Mainnet Status Banner -->
+      <div class="bg-gradient-to-r from-slate-900 via-slate-900/90 to-cyan-950/40 border border-slate-800 rounded-xl p-5 shadow-lg space-y-3">
+        <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div>
+            <div class="flex items-center gap-2">
+              <h2 class="text-base font-bold text-white tracking-tight">Qeuph Mainnet Genesis & Launch Operations</h2>
+              <span class="px-2 py-0.5 rounded text-xs font-mono font-semibold bg-cyan-950 text-cyan-400 border border-cyan-800/60">MAINNET READY</span>
+            </div>
+            <p class="text-xs text-slate-400 mt-1">
+              Deterministic FIPS 204 ML-DSA-87 consensus, double SHA3-512 proof-of-work, and unspendable Bitcoin-style genesis block. Follow this runbook to launch and connect mainnet nodes.
+            </p>
+          </div>
+          <button onclick="runMainnetPreflight()" id="btn-run-preflight" class="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition shadow-md shadow-cyan-600/20 whitespace-nowrap">
+            ⚡ Run Live Preflight Check
+          </button>
+        </div>
+
+        <!-- Real-time Preflight Output Box -->
+        <div id="preflight-status-card" class="hidden bg-slate-950/90 border border-slate-800 rounded-lg p-4 font-mono text-xs space-y-2">
+          <div class="flex items-center justify-between text-slate-400 border-b border-slate-800/80 pb-2">
+            <span class="font-semibold text-white">Mainnet Preflight Diagnostics</span>
+            <span id="preflight-summary-badge" class="px-2 py-0.5 rounded text-[11px] font-bold"></span>
+          </div>
+          <pre id="preflight-output-text" class="text-slate-300 overflow-x-auto whitespace-pre-wrap leading-relaxed"></pre>
+        </div>
+      </div>
+
+      <!-- Mainnet Parameters & Invariants Grid -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl space-y-1">
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Genesis Block Hash</div>
+          <div class="text-xs font-mono text-cyan-400 break-all" title="0000000d2f105b239cd085e9d4bd7fa087dc6a085ee37b3842d539ab9c974247fa8c4000695807b0a5d306d40c713e32b130387f72b64a00bf2b0c9953b179b1">
+            0000000d2f105b239cd0...79b1
+          </div>
+          <div class="text-[10px] text-slate-500 font-mono">Nonce: 355026620 • Bits: 0x3d0fffff</div>
+        </div>
+        <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl space-y-1">
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Launch Timestamp</div>
+          <div class="text-xs font-mono text-emerald-400">2026-10-01 00:00:00 UTC</div>
+          <div class="text-[10px] text-slate-500 font-mono">Unix: 1790812800 • Time Bound: 7200s</div>
+        </div>
+        <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl space-y-1">
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Network Ports & Magic</div>
+          <div class="text-xs font-mono text-indigo-400">P2P: 19090 • RPC: 19091</div>
+          <div class="text-[10px] text-slate-500 font-mono">Magic: b'QUH!' (0x51554821)</div>
+        </div>
+        <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl space-y-1">
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Max Supply & Emission</div>
+          <div class="text-xs font-mono text-amber-400">31,500,000 QUH Cap</div>
+          <div class="text-[10px] text-slate-500 font-mono">54 Epochs • Initial: 50 QUH</div>
+        </div>
+      </div>
+
+      <!-- Step-by-Step Mainnet Launch Runbook -->
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-5">
+        <div>
+          <h3 class="text-sm font-semibold text-white">Step-by-Step Mainnet Launch Runbook</h3>
+          <p class="text-xs text-slate-400">Exact terminal commands to deploy seed nodes, peer validators, wallets, and solo miners.</p>
+        </div>
+
+        <div class="space-y-4">
+          <!-- Step 1 -->
+          <div class="bg-slate-950/80 border border-slate-800/80 rounded-lg p-4 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white">Step 1: Verify System & Cryptographic Preflight</span>
+              <button onclick="copyToClipboard('python3 -m qeuph.cli.main preflight --network mainnet', this)" class="text-xs px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono transition">Copy</button>
+            </div>
+            <p class="text-[11px] text-slate-400">Checks ports 19090/19091 availability, data directory permissions, ML-DSA-87 signatures, and emission constants.</p>
+            <div class="bg-slate-900 border border-slate-800 p-2.5 rounded font-mono text-xs text-cyan-300">python3 -m qeuph.cli.main preflight --network mainnet</div>
+          </div>
+
+          <!-- Step 2 -->
+          <div class="bg-slate-950/80 border border-slate-800/80 rounded-lg p-4 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white">Step 2: Verify Whitepaper Consensus Invariants</span>
+              <button onclick="copyToClipboard('python3 tools/wp_conformance.py', this)" class="text-xs px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono transition">Copy</button>
+            </div>
+            <p class="text-[11px] text-slate-400">Audits block time (300s), retarget interval (2048 blocks), emission decay (2/3 ratio), and genesis coinbase message.</p>
+            <div class="bg-slate-900 border border-slate-800 p-2.5 rounded font-mono text-xs text-cyan-300">python3 tools/wp_conformance.py</div>
+          </div>
+
+          <!-- Step 3 -->
+          <div class="bg-slate-950/80 border border-slate-800/80 rounded-lg p-4 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white">Step 3: Launch First Mainnet Seed Node (Bootstrap Node A)</span>
+              <button onclick="copyToClipboard('python3 -m qeuph.cli.main node --network mainnet --datadir ~/.qeuph/mainnet-seed --listen 0.0.0.0:19090 --rpc 127.0.0.1:19091', this)" class="text-xs px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono transition">Copy</button>
+            </div>
+            <p class="text-[11px] text-slate-400">Starts the first authoritative daemon listening on public P2P port 19090 with secured local JSON-RPC on port 19091.</p>
+            <div class="bg-slate-900 border border-slate-800 p-2.5 rounded font-mono text-xs text-cyan-300 break-all">python3 -m qeuph.cli.main node --network mainnet --datadir ~/.qeuph/mainnet-seed --listen 0.0.0.0:19090 --rpc 127.0.0.1:19091</div>
+          </div>
+
+          <!-- Step 4 -->
+          <div class="bg-slate-950/80 border border-slate-800/80 rounded-lg p-4 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white">Step 4: Connect Peer Nodes to Form Multi-Node Mesh</span>
+              <button onclick="copyToClipboard('python3 -m qeuph.cli.main node --network mainnet --datadir ~/.qeuph/mainnet-node2 --connect SEED_IP:19090', this)" class="text-xs px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono transition">Copy</button>
+            </div>
+            <p class="text-[11px] text-slate-400">Additional nodes connect into the seed node. Replace <code>SEED_IP</code> with your seed node's IP address or hostname.</p>
+            <div class="bg-slate-900 border border-slate-800 p-2.5 rounded font-mono text-xs text-cyan-300">python3 -m qeuph.cli.main node --network mainnet --datadir ~/.qeuph/mainnet-node2 --connect SEED_IP:19090</div>
+          </div>
+
+          <!-- Step 5 -->
+          <div class="bg-slate-950/80 border border-slate-800/80 rounded-lg p-4 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white">Step 5: Launch Web Explorer & Node Console</span>
+              <button onclick="copyToClipboard('python3 -m qeuph.web.server --network mainnet --port 3000 --connect SEED_IP:19090', this)" class="text-xs px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono transition">Copy</button>
+            </div>
+            <p class="text-[11px] text-slate-400">Deploys this Web UI connected directly to the P2P mesh, synchronizing headers, blocks, and mempool transactions in real time.</p>
+            <div class="bg-slate-900 border border-slate-800 p-2.5 rounded font-mono text-xs text-cyan-300">python3 -m qeuph.web.server --network mainnet --port 3000 --connect SEED_IP:19090</div>
+          </div>
+
+          <!-- Step 6 -->
+          <div class="bg-slate-950/80 border border-slate-800/80 rounded-lg p-4 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white">Step 6: Create Post-Quantum Vault Wallet</span>
+              <button onclick="copyToClipboard('python3 -m qeuph.cli.main wallet create --network mainnet', this)" class="text-xs px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono transition">Copy</button>
+            </div>
+            <p class="text-[11px] text-slate-400">Generates a BIP-39 mnemonic phrase and derives your initial Bech32m address (<code>quh1...</code>) encrypted with your passphrase.</p>
+            <div class="bg-slate-900 border border-slate-800 p-2.5 rounded font-mono text-xs text-cyan-300">python3 -m qeuph.cli.main wallet create --network mainnet</div>
+          </div>
+
+          <!-- Step 7 -->
+          <div class="bg-slate-950/80 border border-slate-800/80 rounded-lg p-4 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white">Step 7: Launch Solo Miner on Mainnet Tip</span>
+              <button onclick="copyToClipboard('python3 -m qeuph.cli.main mine --network mainnet --threads 4 --payout YOUR_MAINNET_ADDRESS', this)" class="text-xs px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono transition">Copy</button>
+            </div>
+            <p class="text-[11px] text-slate-400">Begins grinding 16-byte nonces over the double SHA3-512 PoW algorithm. Block rewards pay directly to your quantum address.</p>
+            <div class="bg-slate-900 border border-slate-800 p-2.5 rounded font-mono text-xs text-cyan-300">python3 -m qeuph.cli.main mine --network mainnet --threads 4 --payout YOUR_MAINNET_ADDRESS</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Connected Peers & Mesh Topology -->
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-4">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div>
+            <h3 class="text-sm font-semibold text-white">Live Peer Mesh (P2P Discovery)</h3>
+            <p class="text-xs text-slate-400">Directly connected TCP peers in the active gossip network.</p>
+          </div>
+          <button onclick="refreshMainnetPeers()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs rounded text-slate-300 transition">↻ Refresh Peers</button>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-800/40 text-slate-400 uppercase text-[10px] tracking-wider">
+              <tr>
+                <th class="py-2.5 px-3">Peer Address</th>
+                <th class="py-2.5 px-3">Type</th>
+                <th class="py-2.5 px-3">Height</th>
+                <th class="py-2.5 px-3">Latency</th>
+                <th class="py-2.5 px-3">Subversion</th>
+              </tr>
+            </thead>
+            <tbody id="table-mainnet-peers" class="divide-y divide-slate-800/60">
+              <tr>
+                <td colspan="5" class="py-6 text-center text-slate-500">Scanning connected peers...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Direct Interactive CLI Terminal Execution -->
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-4">
+        <div>
+          <h3 class="text-sm font-semibold text-white">Interactive Node CLI Console</h3>
+          <p class="text-xs text-slate-400">Run safe read-only CLI commands directly against the active node engine.</p>
+        </div>
+
+        <div class="flex flex-wrap gap-2">
+          <button onclick="runCliCmd(['preflight', '--network', 'mainnet'])" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs rounded font-mono transition border border-slate-700">qeuph preflight --network mainnet</button>
+          <button onclick="runCliCmd(['genesis', '--network', 'mainnet'])" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs rounded font-mono transition border border-slate-700">qeuph genesis --network mainnet</button>
+          <button onclick="runCliCmd(['emission'])" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs rounded font-mono transition border border-slate-700">qeuph emission</button>
+          <button onclick="runCliCmd(['crypto'])" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs rounded font-mono transition border border-slate-700">qeuph crypto</button>
+          <button onclick="runCliCmd(['version'])" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs rounded font-mono transition border border-slate-700">qeuph version</button>
+          <button onclick="runCliCmd(['chain', 'info'])" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs rounded font-mono transition border border-slate-700">qeuph chain info</button>
+        </div>
+
+        <div class="space-y-1">
+          <label class="block text-xs font-semibold text-slate-300">Command Output</label>
+          <pre id="cli-live-output" class="w-full h-44 overflow-auto bg-slate-950 border border-slate-800 rounded-xl p-3 font-mono text-xs text-emerald-400">Select a command above to execute...</pre>
+        </div>
+      </div>
+
     </div>
 
   </main>
@@ -773,6 +964,7 @@
       if (tabId === 'wallet') refreshWallet();
       if (tabId === 'mempool') refreshMempool();
       if (tabId === 'emission') loadEmission();
+      if (tabId === 'mainnet') refreshMainnetPeers();
     }
 
     async function fetchStatus() {
@@ -1473,6 +1665,105 @@
       } catch (e) {
         resBox.textContent = 'Error: ' + e;
       }
+    }
+
+    async function runMainnetPreflight() {
+      const btn = document.getElementById('btn-run-preflight');
+      const card = document.getElementById('preflight-status-card');
+      const badge = document.getElementById('preflight-summary-badge');
+      const output = document.getElementById('preflight-output-text');
+
+      card.classList.remove('hidden');
+      badge.className = 'px-2 py-0.5 rounded text-[11px] font-bold bg-amber-950 text-amber-300 border border-amber-800/60';
+      badge.textContent = 'RUNNING DIAGNOSTICS...';
+      output.textContent = 'Running `qeuph preflight --network mainnet` against consensus constants...';
+
+      try {
+        const res = await fetch('/api/cli', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({args: ['preflight', '--network', 'mainnet']})
+        });
+        const data = await res.json();
+        const text = (data.stdout || '') + (data.stderr ? '\n' + data.stderr : '');
+        output.textContent = text || data.error || 'Preflight completed without output.';
+
+        if (data.ok && !text.includes('fail')) {
+          badge.className = 'px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800/60';
+          badge.textContent = 'PASSED (MAINNET READY)';
+        } else {
+          badge.className = 'px-2 py-0.5 rounded text-[11px] font-bold bg-rose-950 text-rose-300 border border-rose-800/60';
+          badge.textContent = 'ATTENTION REQUIRED';
+        }
+      } catch (err) {
+        badge.className = 'px-2 py-0.5 rounded text-[11px] font-bold bg-rose-950 text-rose-300 border border-rose-800/60';
+        badge.textContent = 'ERROR';
+        output.textContent = 'Failed to execute preflight: ' + err;
+      }
+    }
+
+    async function refreshMainnetPeers() {
+      const tbody = document.getElementById('table-mainnet-peers');
+      try {
+        const res = await fetch('/api/peers');
+        const data = await res.json();
+        const peers = data.peers || [];
+        if (peers.length === 0) {
+          tbody.innerHTML = `
+            <tr>
+              <td colspan="5" class="py-6 text-center text-slate-500">
+                No external peers currently connected. Launch nodes with <code>--connect &lt;seed_ip&gt;:19090</code> to form a multi-node cluster.
+              </td>
+            </tr>
+          `;
+          return;
+        }
+        tbody.innerHTML = peers.map(p => `
+          <tr class="hover:bg-slate-800/30">
+            <td class="py-2.5 px-3 text-cyan-300">${p.addr || p.peer_id || 'unknown'}</td>
+            <td class="py-2.5 px-3 text-slate-400">${p.inbound ? 'Inbound' : 'Outbound'}</td>
+            <td class="py-2.5 px-3 text-white">${p.height !== undefined ? p.height : '—'}</td>
+            <td class="py-2.5 px-3 text-emerald-400">${p.latency_ms !== undefined ? p.latency_ms + 'ms' : 'active'}</td>
+            <td class="py-2.5 px-3 text-slate-500 truncate max-w-xs">${p.subver || p.version || 'qeuph/2.0.0'}</td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        console.error('Error fetching peers:', e);
+      }
+    }
+
+    async function runCliCmd(args) {
+      const out = document.getElementById('cli-live-output');
+      out.textContent = `Running: qeuph ${args.join(' ')}...\n`;
+      try {
+        const res = await fetch('/api/cli', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({args: args})
+        });
+        const data = await res.json();
+        if (data.ok) {
+          out.textContent = (data.stdout || '') + (data.stderr ? '\n' + data.stderr : '');
+        } else {
+          out.textContent = 'Command failed:\n' + (data.error || data.stderr || 'Unknown error');
+        }
+      } catch (e) {
+        out.textContent = 'Error executing command: ' + e;
+      }
+    }
+
+    function copyToClipboard(text, btn) {
+      navigator.clipboard.writeText(text).then(() => {
+        const old = btn.textContent;
+        btn.textContent = 'Copied!';
+        btn.className = 'text-xs px-2.5 py-1 bg-emerald-600 text-white rounded font-mono transition';
+        setTimeout(() => {
+          btn.textContent = old;
+          btn.className = 'text-xs px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-mono transition';
+        }, 1500);
+      }).catch(err => {
+        console.error('Copy failed:', err);
+      });
     }
 
     // Initialize

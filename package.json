@@ -38,6 +38,8 @@
     "conformance": "python3 tools/wp_conformance.py",
     "genesis": "python3 -m qeuph.cli.main genesis",
     "emission": "python3 -m qeuph.cli.main emission",
-    "verify": "python3 -m qeuph.cli.main chain verify"
+    "verify": "python3 -m qeuph.cli.main chain verify",
+    "cluster": "python3 tools/launch_cluster.py",
+    "cluster:mainnet": "python3 tools/launch_cluster.py --network mainnet --nodes 3"
   }
 }
